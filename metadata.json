@@ -1,0 +1,6 @@
+{
+  "name": "Horizon Drift: Wildlands",
+  "description": "Freestyle 3D open-world driving simulator across scenic highways, lush grasslands, dense forests, and alpine mountains with realistic suspension physics and dynamic weather.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
