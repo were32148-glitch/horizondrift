@@ -256,6 +256,46 @@ export class ProceduralAudioEngine {
     });
   }
 
+  playReactionSound(kind: 'shout' | 'bark' | 'meow' | 'chirp' | 'growl' | 'squeak'): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    if (kind === 'bark') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(240, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.14);
+    } else if (kind === 'meow') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.linearRampToValueAtTime(760, now + 0.08);
+      osc.frequency.exponentialRampToValueAtTime(420, now + 0.24);
+    } else if (kind === 'chirp') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1800, now);
+      osc.frequency.exponentialRampToValueAtTime(2600, now + 0.08);
+    } else if (kind === 'growl') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(92, now);
+      osc.frequency.linearRampToValueAtTime(64, now + 0.25);
+    } else if (kind === 'squeak') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1100, now);
+      osc.frequency.exponentialRampToValueAtTime(1750, now + 0.09);
+    } else {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(340, now);
+      osc.frequency.exponentialRampToValueAtTime(210, now + 0.18);
+    }
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.18, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.28);
+  }
+
   private playThunder(): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;

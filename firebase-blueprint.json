@@ -1,0 +1,231 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Player persistent cloud garage and coin balance tied to authenticated UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "coins": {
+          "type": "number"
+        },
+        "ownedCars": {
+          "type": "array",
+          "description": "Array of owned car IDs (max 10)."
+        },
+        "equippedP1": {
+          "type": "string",
+          "enum": ["apex", "baja", "viper", "phantom", "titan"],
+          "maxLength": 16
+        },
+        "equippedP2": {
+          "type": "string",
+          "enum": ["apex", "baja", "viper", "phantom", "titan"],
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "coins", "ownedCars", "equippedP1", "equippedP2", "createdAt", "updatedAt"]
+    },
+    "Lobby": {
+      "title": "Lobby",
+      "description": "Cloud multiplayer lobby room indexed by 6-character join code.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$"
+        },
+        "hostUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["online_2v2", "online_ffa"],
+          "maxLength": 16
+        },
+        "mapId": {
+          "type": "string",
+          "enum": ["valley", "canyon", "alpine", "coast"],
+          "maxLength": 16
+        },
+        "weatherPreset": {
+          "type": "string",
+          "enum": ["clear", "overcast", "rain", "blizzard", "night", "auto"],
+          "maxLength": 16
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "racing", "finished"],
+          "maxLength": 16
+        },
+        "winnerTeam": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "maxPlayers": {
+          "type": "number"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "code",
+        "hostUid",
+        "hostName",
+        "mode",
+        "mapId",
+        "weatherPreset",
+        "status",
+        "maxPlayers",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LobbyMember": {
+      "title": "LobbyMember",
+      "description": "Player membership and team assignment inside a cloud lobby.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "lobbyCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "carId": {
+          "type": "string",
+          "enum": ["apex", "baja", "viper", "phantom", "titan"],
+          "maxLength": 16
+        },
+        "team": {
+          "type": "string",
+          "enum": ["red", "blue", "ffa"],
+          "maxLength": 8
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "lobbyCode", "displayName", "carId", "team", "ready", "joinedAt", "updatedAt"]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Verified race finish record submitted by a player.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "mapId": {
+          "type": "string",
+          "enum": ["valley", "canyon", "alpine", "coast"],
+          "maxLength": 16
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["race1p", "race2p", "online_2v2", "online_ffa"],
+          "maxLength": 16
+        },
+        "carId": {
+          "type": "string",
+          "enum": ["apex", "baja", "viper", "phantom", "titan"],
+          "maxLength": 16
+        },
+        "bestTimeSec": {
+          "type": "number"
+        },
+        "driftScore": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "mapId", "mode", "carId", "bestTimeSec", "driftScore", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-only persistent player garage, coins, and equipped cars."
+    },
+    "/lobbies/{lobbyId}": {
+      "schema": { "$ref": "#/entities/Lobby" },
+      "description": "Cloud multiplayer lobbies indexed by 6-char uppercase lobby code."
+    },
+    "/lobbies/{lobbyId}/members/{uid}": {
+      "schema": { "$ref": "#/entities/LobbyMember" },
+      "description": "Active players joined inside a multiplayer lobby."
+    },
+    "/leaderboards/{entryId}": {
+      "schema": { "$ref": "#/entities/LeaderboardEntry" },
+      "description": "Player race lap/finish leaderboard records."
+    }
+  }
+}

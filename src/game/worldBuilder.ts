@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { buildLosSantosAndStructures } from './losSantosBuilder';
 import { TERRAIN_SIZE } from './maps';
 import {
   clamp,
   fbm2D,
   getMapWorldData,
+  getTerrainHeightAndFactors,
   getTerrainSample,
   groundHeightAt,
   lerp,
@@ -25,8 +27,8 @@ export interface BeaconVisual {
 
 export interface WorldVisualRig {
   group: THREE.Group;
-  roadMaterial: THREE.MeshPhysicalMaterial;
-  waterMaterial: THREE.MeshPhysicalMaterial;
+  roadMaterial: THREE.MeshStandardMaterial;
+  waterMaterial: THREE.MeshStandardMaterial;
   grassMaterial: THREE.MeshStandardMaterial;
   beacons: BeaconVisual[];
   collectCoin: (index: number) => void;
@@ -47,14 +49,16 @@ function buildSplineRibbonGeometry(
   mapId: MapId,
 ): THREE.BufferGeometry {
   const count = points.length;
-  const vertCount = (closed ? count + 1 : count) * 2;
+  const steps = closed ? count + 1 : count;
+  // 4 vertices per cross-section: [0]=left shoulder skirt (-0.42m), [1]=left road edge, [2]=right road edge, [3]=right shoulder skirt (-0.42m)
+  const vertCount = steps * 4;
   const positions = new Float32Array(vertCount * 3);
   const uvs = new Float32Array(vertCount * 2);
   const indices: number[] = [];
 
   let accumDist = 0;
   const halfW = width * 0.5;
-  const steps = closed ? count + 1 : count;
+  const skirtHalfW = halfW + 1.8;
 
   for (let i = 0; i < steps; i++) {
     const idx = i % count;
@@ -92,33 +96,56 @@ function buildSplineRibbonGeometry(
     const rx = curr.x - nx * halfW;
     const rz = curr.z - nz * halfW;
 
-    const leftH = groundHeightAt(lx, lz, mapId);
-    const rightH = groundHeightAt(rx, rz, mapId);
+    const slx = curr.x + nx * skirtHalfW;
+    const slz = curr.z + nz * skirtHalfW;
+    const srx = curr.x - nx * skirtHalfW;
+    const srz = curr.z - nz * skirtHalfW;
+
+    const leftH = groundHeightAt(lx, lz, mapId, false);
+    const rightH = groundHeightAt(rx, rz, mapId, false);
     const ly = leftH + yOffset;
     const ry = rightH + yOffset;
 
-    const vBase = i * 2;
-    positions[vBase * 3] = lx;
-    positions[vBase * 3 + 1] = ly;
-    positions[vBase * 3 + 2] = lz;
+    const vBase = i * 4;
+    // Left skirt (anchored cleanly into ground)
+    positions[vBase * 3] = slx;
+    positions[vBase * 3 + 1] = groundHeightAt(slx, slz, mapId, false) - 0.42;
+    positions[vBase * 3 + 2] = slz;
 
-    positions[(vBase + 1) * 3] = rx;
-    positions[(vBase + 1) * 3 + 1] = ry;
-    positions[(vBase + 1) * 3 + 2] = rz;
+    // Left deck edge
+    positions[(vBase + 1) * 3] = lx;
+    positions[(vBase + 1) * 3 + 1] = ly;
+    positions[(vBase + 1) * 3 + 2] = lz;
+
+    // Right deck edge
+    positions[(vBase + 2) * 3] = rx;
+    positions[(vBase + 2) * 3 + 1] = ry;
+    positions[(vBase + 2) * 3 + 2] = rz;
+
+    // Right skirt (anchored cleanly into ground)
+    positions[(vBase + 3) * 3] = srx;
+    positions[(vBase + 3) * 3 + 1] = groundHeightAt(srx, srz, mapId, false) - 0.42;
+    positions[(vBase + 3) * 3 + 2] = srz;
 
     const vCoord = accumDist / uvTileLength;
     uvs[vBase * 2] = 0;
     uvs[vBase * 2 + 1] = vCoord;
-    uvs[(vBase + 1) * 2] = 1;
+    uvs[(vBase + 1) * 2] = 0;
     uvs[(vBase + 1) * 2 + 1] = vCoord;
+    uvs[(vBase + 2) * 2] = 1;
+    uvs[(vBase + 2) * 2 + 1] = vCoord;
+    uvs[(vBase + 3) * 2] = 1;
+    uvs[(vBase + 3) * 2 + 1] = vCoord;
 
     if (i < steps - 1) {
-      const a = vBase;
-      const b = vBase + 1;
-      const c = vBase + 2;
-      const d = vBase + 3;
-      // Right-handed +Y upward normals
-      indices.push(a, c, b, b, c, d);
+      for (let strip = 0; strip < 3; strip++) {
+        const a = vBase + strip;
+        const b = vBase + strip + 1;
+        const c = vBase + 4 + strip;
+        const d = vBase + 4 + strip + 1;
+        // Right-handed +Y upward normals
+        indices.push(a, c, b, b, c, d);
+      }
     }
   }
 
@@ -173,8 +200,8 @@ export function createWorldVisualRig(
   const group = new THREE.Group();
   const dummy = new THREE.Object3D();
 
-  // --- 1. Sculpted 5x Multi-Biome Terrain Mesh (136x136 grid over 1480m) ---
-  const segs = 136;
+  // --- 1. Sculpted Multi-Biome Terrain Mesh (256x256 GPU / 192x192 SoftwareGL over 6800m) ---
+  const segs = isSoftwareGl ? 192 : 256;
   const terrainGeo = track(new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, segs, segs));
   terrainGeo.rotateX(-Math.PI / 2);
 
@@ -189,16 +216,20 @@ export function createWorldVisualRig(
   const colSnow = new THREE.Color(config.colors.snow);
   const colSand = new THREE.Color(config.colors.sand);
   const colRoadShoulder = new THREE.Color(config.colors.shoulder);
+  const colConcrete = new THREE.Color(0x525b66);
 
   for (let i = 0; i < posAttr.count; i++) {
     const x = posAttr.getX(i);
     const z = posAttr.getZ(i);
     const sample = getTerrainSample(x, z, mapId);
-    const visualY = sample.height - sample.roadFactor * 0.22 - sample.trailFactor * 0.14;
+    // Depress terrain cleanly beneath paved & dirt roads so coarse triangles never poke through road ribbons
+    const visualY = sample.height - sample.roadFactor * 0.44 - sample.trailFactor * 0.24;
     posAttr.setY(i, visualY);
 
     const microVar = fbm2D(x * 0.032, z * 0.032, 2) * 0.5 + 0.5;
-    if (sample.surface === 'snow') {
+    if (sample.surface === 'concrete') {
+      cTmp.copy(colConcrete).offsetHSL(0, 0, (microVar - 0.5) * 0.05);
+    } else if (sample.surface === 'snow') {
       cTmp.copy(colSnow).lerp(colRock, clamp(sample.slope * 1.4, 0, 0.35));
     } else if (sample.surface === 'rock') {
       cTmp.copy(colRock).offsetHSL(0, 0, (microVar - 0.5) * 0.08);
@@ -230,31 +261,31 @@ export function createWorldVisualRig(
     new THREE.MeshStandardMaterial({
       vertexColors: true,
       bumpMap: textures.terrainBump,
-      bumpScale: 0.28,
-      roughness: 0.96,
+      bumpScale: 0.36,
+      roughness: 0.94,
       metalness: 0.0,
-      envMapIntensity: 0.2,
+      envMapIntensity: 0.24,
     }),
   );
   const terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
   terrainMesh.receiveShadow = !isSoftwareGl;
+  terrainMesh.matrixAutoUpdate = false;
+  terrainMesh.updateMatrix();
   group.add(terrainMesh);
 
-  // --- 2. Paved 2-Lane Circuit Ribbon + Forest Gravel Trail ---
+  // --- 2. Paved 6-Lane Grand Prix Circuit Ribbon + Distinct Highway Material + Forest Gravel Trail ---
   const roadGeo = track(
-    buildSplineRibbonGeometry(world.roadPoints, true, config.roadWidth, 0.015, 12, mapId),
+    buildSplineRibbonGeometry(world.roadPoints, true, config.roadWidth, 0.07, 22, mapId),
   );
   const roadMaterial = track(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: textures.asphaltMap,
       bumpMap: textures.asphaltBump,
-      bumpScale: 0.08,
-      roughness: 0.8,
-      metalness: 0.04,
-      clearcoat: 0.0,
-      clearcoatRoughness: 0.14,
-      envMapIntensity: 0.24,
+      bumpScale: 0.14,
+      roughness: 0.72,
+      metalness: 0.06,
+      envMapIntensity: 0.36,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
@@ -262,15 +293,34 @@ export function createWorldVisualRig(
   );
   const roadMesh = new THREE.Mesh(roadGeo, roadMaterial);
   roadMesh.receiveShadow = !isSoftwareGl;
+  roadMesh.matrixAutoUpdate = false;
+  roadMesh.updateMatrix();
   group.add(roadMesh);
 
+  const highwayMaterial = track(
+    new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: textures.highwayMap,
+      bumpMap: textures.asphaltBump,
+      bumpScale: 0.12,
+      roughness: 0.74,
+      metalness: 0.06,
+      envMapIntensity: 0.34,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    }),
+  );
+
   const trailGeo = track(
-    buildSplineRibbonGeometry(world.trailPoints, false, trailHalfW * 2, 0.015, 8, mapId),
+    buildSplineRibbonGeometry(world.trailPoints, false, trailHalfW * 2, 0.02, 10, mapId),
   );
   const trailMat = track(
     new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: textures.dirtMap,
+      bumpMap: textures.terrainBump,
+      bumpScale: 0.16,
       roughness: 0.94,
       metalness: 0.02,
       polygonOffset: true,
@@ -280,11 +330,25 @@ export function createWorldVisualRig(
   );
   const trailMesh = new THREE.Mesh(trailGeo, trailMat);
   trailMesh.receiveShadow = !isSoftwareGl;
+  trailMesh.matrixAutoUpdate = false;
+  trailMesh.updateMatrix();
   group.add(trailMesh);
+
+  // --- 2b. Los Santos Metropolis, Mountain Passes, Elevated Freeway, Pier & Barricades ---
+  const lsStructures = buildLosSantosAndStructures(
+    world,
+    mapId,
+    textures,
+    isSoftwareGl,
+    highwayMaterial,
+    buildSplineRibbonGeometry,
+    track,
+  );
+  group.add(lsStructures.group);
 
   // --- 3. Start / Finish Line Complex (Checkered Tarmac, Grid Boxes, Overhead Truss Gantry, 5 Countdown Lights, Pit Garages, Grandstands) ---
   const startPose = world.startPose;
-  const startY = groundHeightAt(startPose.x, startPose.z, mapId) + 0.02;
+  const startY = groundHeightAt(startPose.x, startPose.z, mapId) + 0.05;
   const startGroup = new THREE.Group();
   startGroup.position.set(startPose.x, startY, startPose.z);
   startGroup.rotation.y = startPose.yaw;
@@ -530,13 +594,14 @@ export function createWorldVisualRig(
     const nz = tx;
     const segYaw = Math.atan2(tx, tz);
 
-    // Delineator posts every 3rd sample
+    // Delineator posts every 3rd sample (skip highway/trail intersections)
     if (i % 3 === 0) {
       for (const side of [-1, 1]) {
         const px = curr.x + nx * (roadHalfW + 1.0) * side;
         const pz = curr.z + nz * (roadHalfW + 1.0) * side;
-        const py = groundHeightAt(px, pz, mapId);
-        postPositions.push([px, py, pz]);
+        const fac = getTerrainHeightAndFactors(px, pz, mapId);
+        if (fac.cityRoadFactor > 0.1 || fac.passFactor > 0.1 || fac.trailFactor > 0.25) continue;
+        postPositions.push([px, fac.height, pz]);
       }
     }
 
@@ -553,7 +618,9 @@ export function createWorldVisualRig(
       for (const side of [-1, 1]) {
         const rx = curr.x + nx * (roadHalfW + 0.75) * side;
         const rz = curr.z + nz * (roadHalfW + 0.75) * side;
-        const ry = Math.max(groundHeightAt(rx, rz, mapId), roadH) + 0.52;
+        const fac = getTerrainHeightAndFactors(rx, rz, mapId);
+        if (fac.cityRoadFactor > 0.1 || fac.passFactor > 0.1 || fac.trailFactor > 0.25) continue;
+        const ry = Math.max(fac.height, roadH) + 0.52;
         railTransforms.push({ x: rx, y: ry, z: rz, yaw: segYaw });
       }
     }
@@ -562,10 +629,11 @@ export function createWorldVisualRig(
       const outside = dYaw > 0 ? 1 : -1;
       const sx = curr.x + nx * (roadHalfW + 2.2) * outside;
       const sz = curr.z + nz * (roadHalfW + 2.2) * outside;
-      const sy = groundHeightAt(sx, sz, mapId);
+      const fac = getTerrainHeightAndFactors(sx, sz, mapId);
+      if (fac.cityRoadFactor > 0.1 || fac.passFactor > 0.1) continue;
       signTransforms.push({
         x: sx,
-        y: sy + 1.8,
+        y: fac.height + 1.8,
         z: sz,
         yaw: segYaw + (outside > 0 ? -Math.PI * 0.25 : Math.PI * 0.25),
       });
@@ -629,6 +697,91 @@ export function createWorldVisualRig(
     signPoleInst.computeBoundingSphere();
     group.add(signInst);
     group.add(signPoleInst);
+  }
+
+  // --- 4b. Reflective Centerline & Lane-Edge Cat-Eye Road Studs & Circuit Floodlights ---
+  const studPositions: Array<[number, number, number]> = [];
+  const circuitLampPos: Array<{ x: number; y: number; z: number; yaw: number }> = [];
+  for (let i = 0; i < pts.length; i += 2) {
+    const curr = pts[i];
+    const next = pts[(i + 1) % pts.length];
+    const dx = next.x - curr.x;
+    const dz = next.z - curr.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const nx = -dz / len;
+    const nz = dx / len;
+    for (const laneOffset of [0, -roadHalfW * 0.45, roadHalfW * 0.45]) {
+      const sx = curr.x + nx * laneOffset;
+      const sz = curr.z + nz * laneOffset;
+      const sy = groundHeightAt(sx, sz, mapId, false) + 0.065;
+      studPositions.push([sx, sy, sz]);
+    }
+    if (i % 8 === 0) {
+      const lx = curr.x + nx * (roadHalfW + 2.1);
+      const lz = curr.z + nz * (roadHalfW + 2.1);
+      const fac = getTerrainHeightAndFactors(lx, lz, mapId);
+      if (fac.cityRoadFactor < 0.1 && fac.passFactor < 0.1) {
+        circuitLampPos.push({ x: lx, y: fac.height, z: lz, yaw: Math.atan2(-nx, -nz) });
+      }
+    }
+  }
+  if (studPositions.length > 0) {
+    const studGeo = track(new THREE.BoxGeometry(0.28, 0.06, 0.28));
+    const studMat = track(
+      new THREE.MeshStandardMaterial({
+        color: 0xfef08a,
+        emissive: 0xf59e0b,
+        emissiveIntensity: 1.4,
+        roughness: 0.2,
+      }),
+    );
+    const studInst = new THREE.InstancedMesh(studGeo, studMat, studPositions.length);
+    studPositions.forEach(([sx, sy, sz], idx) => {
+      dummy.position.set(sx, sy, sz);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      studInst.setMatrixAt(idx, dummy.matrix);
+    });
+    studInst.instanceMatrix.needsUpdate = true;
+    studInst.computeBoundingSphere();
+    group.add(studInst);
+  }
+  if (circuitLampPos.length > 0) {
+    const cPoleGeo = track(new THREE.CylinderGeometry(0.14, 0.22, 9.2, 7));
+    cPoleGeo.translate(0, 4.6, 0);
+    const cHeadGeo = track(new THREE.BoxGeometry(0.55, 0.28, 1.5));
+    const cHeadMat = track(
+      new THREE.MeshStandardMaterial({
+        color: 0xf8fafc,
+        emissive: 0xfef3c7,
+        emissiveIntensity: 1.65,
+        roughness: 0.2,
+      }),
+    );
+    const cPoleInst = new THREE.InstancedMesh(cPoleGeo, steelMat, circuitLampPos.length);
+    const cHeadInst = new THREE.InstancedMesh(cHeadGeo, cHeadMat, circuitLampPos.length);
+    circuitLampPos.forEach((lp, idx) => {
+      dummy.position.set(lp.x, lp.y - 0.1, lp.z);
+      dummy.rotation.set(0, lp.yaw, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      cPoleInst.setMatrixAt(idx, dummy.matrix);
+
+      dummy.position.set(
+        lp.x + Math.sin(lp.yaw) * 0.75,
+        lp.y + 9.0,
+        lp.z + Math.cos(lp.yaw) * 0.75,
+      );
+      dummy.updateMatrix();
+      cHeadInst.setMatrixAt(idx, dummy.matrix);
+    });
+    cPoleInst.instanceMatrix.needsUpdate = true;
+    cHeadInst.instanceMatrix.needsUpdate = true;
+    cPoleInst.computeBoundingSphere();
+    cHeadInst.computeBoundingSphere();
+    group.add(cPoleInst);
+    group.add(cHeadInst);
   }
 
   // --- 5. Giant Animated Wind Turbines & Forest Watchtowers ---
@@ -696,19 +849,18 @@ export function createWorldVisualRig(
     group.add(wtGroup);
   }
 
-  // --- 6. Lake / Bay / River Water Plane ---
+  // --- 6. Lake / Bay / River Reflective Water Plane ---
   const waterUniforms = { uTime: { value: 0 } };
-  const waterGeo = track(new THREE.PlaneGeometry(540, 480, 24, 24));
+  const waterGeo = track(new THREE.PlaneGeometry(540, 480, 40, 40));
   waterGeo.rotateX(-Math.PI / 2);
   const waterMaterial = track(
-    new THREE.MeshPhysicalMaterial({
+    new THREE.MeshStandardMaterial({
       color: config.colors.water,
-      roughness: 0.14,
-      metalness: 0.18,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.08,
+      roughness: 0.08,
+      metalness: 0.35,
+      envMapIntensity: 1.35,
       transparent: true,
-      opacity: 0.84,
+      opacity: 0.86,
     }),
   );
   waterMaterial.onBeforeCompile = (shader) => {
@@ -718,8 +870,9 @@ export function createWorldVisualRig(
       '#include <begin_vertex>',
       `
       #include <begin_vertex>
-      transformed.y += sin(transformed.x * 0.18 + uTime * 1.6) * 0.09
-                     + cos(transformed.z * 0.24 - uTime * 1.2) * 0.08;
+      transformed.y += sin(transformed.x * 0.18 + uTime * 1.8) * 0.11
+                     + cos(transformed.z * 0.24 - uTime * 1.4) * 0.09
+                     + sin((transformed.x + transformed.z) * 0.35 + uTime * 2.3) * 0.04;
       `,
     );
   };
@@ -727,10 +880,11 @@ export function createWorldVisualRig(
   waterMesh.position.set(-25, config.waterLevel, -30);
   group.add(waterMesh);
 
-  // --- 7. Multi-Part Trees (Pine, SnowPine, Oak, Cypress) & Boulders (InstancedMesh) ---
+  // --- 7. Multi-Part Trees (Pine, SnowPine, Oak, Cypress, Palm) & Boulders (InstancedMesh) ---
   const pines = world.obstacles.filter((o) => o.kind === 'pine' || o.kind === 'snowPine');
   const oaks = world.obstacles.filter((o) => o.kind === 'oak');
   const cypresses = world.obstacles.filter((o) => o.kind === 'cypress');
+  const palms = world.obstacles.filter((o) => o.kind === 'palm');
   const rocks = world.obstacles.filter((o) => o.kind === 'rock' || o.kind === 'boulder');
 
   const barkMat = track(
@@ -780,9 +934,6 @@ export function createWorldVisualRig(
     const instT1 = new THREE.InstancedMesh(tier1Geo, pineLeafMat, pines.length);
     const instT2 = new THREE.InstancedMesh(tier2Geo, pineLeafMat, pines.length);
     const instT3 = new THREE.InstancedMesh(tier3Geo, pineLeafMat, pines.length);
-
-    instTrunk.castShadow = !isSoftwareGl;
-    instT1.castShadow = !isSoftwareGl;
 
     const pColor = new THREE.Color();
     pines.forEach((p, idx) => {
@@ -851,9 +1002,6 @@ export function createWorldVisualRig(
     const instCB = new THREE.InstancedMesh(crownBGeo, oakLeafMat, oaks.length);
     const instCC = new THREE.InstancedMesh(crownCGeo, oakLeafMat, oaks.length);
 
-    instOakTrunk.castShadow = !isSoftwareGl;
-    instCA.castShadow = !isSoftwareGl;
-
     const oColor = new THREE.Color();
     oaks.forEach((o, idx) => {
       const s = o.height / 8.2;
@@ -921,7 +1069,6 @@ export function createWorldVisualRig(
     rockGeo.computeVertexNormals();
 
     const instRocks = new THREE.InstancedMesh(rockGeo, rockMat, rocks.length);
-    instRocks.castShadow = !isSoftwareGl;
     instRocks.receiveShadow = !isSoftwareGl;
 
     const rColor = new THREE.Color();
@@ -945,6 +1092,45 @@ export function createWorldVisualRig(
     if (instRocks.instanceColor) instRocks.instanceColor.needsUpdate = true;
     instRocks.computeBoundingSphere();
     group.add(instRocks);
+  }
+
+  if (palms.length > 0) {
+    const pTrunkGeo = track(new THREE.CylinderGeometry(0.18, 0.34, 10.5, 7));
+    pTrunkGeo.translate(0, 5.25, 0);
+    const frondParts: THREE.BufferGeometry[] = [];
+    for (let f = 0; f < 6; f++) {
+      const ang = (f / 6) * Math.PI * 2;
+      const frond = new THREE.ConeGeometry(0.82, 4.4, 4);
+      frond.scale(1.15, 1.0, 0.22);
+      frond.rotateX(Math.PI * 0.62);
+      frond.translate(0, 0.2, 2.0);
+      frond.rotateY(ang);
+      frond.translate(0, 10.4, 0);
+      frondParts.push(frond);
+    }
+    const pCrownGeo = track(mergeGeometries(frondParts));
+    frondParts.forEach((f) => f.dispose());
+
+    const pInstTrunk = new THREE.InstancedMesh(pTrunkGeo, barkMat, palms.length);
+    const pInstCrown = new THREE.InstancedMesh(pCrownGeo, oakLeafMat, palms.length);
+    const palmColor = new THREE.Color();
+    palms.forEach((pm, idx) => {
+      const s = pm.height / 11.5;
+      dummy.position.set(pm.x, pm.y - 0.15, pm.z);
+      dummy.rotation.set(((pm.id % 5) - 2) * 0.03, (pm.id * 1.1) % (Math.PI * 2), 0);
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      pInstTrunk.setMatrixAt(idx, dummy.matrix);
+      pInstCrown.setMatrixAt(idx, dummy.matrix);
+      palmColor.setHSL(0.28 + ((pm.id % 5) / 5) * 0.04, 0.56, 0.25);
+      pInstCrown.setColorAt(idx, palmColor);
+    });
+    [pInstTrunk, pInstCrown].forEach((m) => {
+      m.instanceMatrix.needsUpdate = true;
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      m.computeBoundingSphere();
+      group.add(m);
+    });
   }
 
   // --- 8. Wind-Swaying Grassland / Scrub Tufts (InstancedMesh + Wind Shader) ---
@@ -980,14 +1166,14 @@ export function createWorldVisualRig(
     gSeed = (Math.imul(gSeed, 1664525) + 1013904223) >>> 0;
     return gSeed / 4294967296;
   };
-  for (let i = 0; i < 3200 && grassCoords.length < 1800; i++) {
+  for (let i = 0; i < 2000 && grassCoords.length < 900; i++) {
     const gx = (gRand() - 0.5) * 980;
     const gz = (gRand() - 0.5) * 980;
     const sample = getTerrainSample(gx, gz, mapId);
     if (
       (sample.surface === 'grass' || sample.surface === 'forest' || (mapId === 'canyon' && sample.surface === 'sand')) &&
-      sample.roadFactor < 0.05 &&
-      sample.trailFactor < 0.05 &&
+      sample.roadFactor < 0.02 &&
+      sample.trailFactor < 0.04 &&
       sample.slope < 0.3 &&
       sample.height > config.waterLevel + 0.5
     ) {
@@ -995,7 +1181,7 @@ export function createWorldVisualRig(
         x: gx,
         y: sample.height - 0.05,
         z: gz,
-        s: 0.85 + gRand() * 0.95,
+        s: 0.95 + gRand() * 0.95,
         rot: gRand() * Math.PI * 2,
         col: gRand(),
       });
@@ -1035,7 +1221,7 @@ export function createWorldVisualRig(
   );
   for (const r of world.ramps) {
     const rGroup = new THREE.Group();
-    const baseY = groundHeightAt(r.x, r.z, mapId);
+    const baseY = groundHeightAt(r.x, r.z, mapId, false) + (r.baseYOffset ?? 0);
     rGroup.position.set(r.x, baseY, r.z);
     rGroup.rotation.y = r.yaw;
 
@@ -1050,7 +1236,7 @@ export function createWorldVisualRig(
       new THREE.ExtrudeGeometry(rShape, {
         depth: r.width,
         bevelEnabled: false,
-        curveSegments: 10,
+        curveSegments: 12,
       }),
     );
     wedgeGeo.translate(0, 0, -r.width * 0.5);
@@ -1060,12 +1246,32 @@ export function createWorldVisualRig(
     wedge.receiveShadow = !isSoftwareGl;
     rGroup.add(wedge);
 
-    const railGeo = track(new THREE.BoxGeometry(0.18, 0.32, r.length));
+    const railGeo = track(new THREE.BoxGeometry(0.22, 0.36, r.length));
+    const ledEdgeMat = track(
+      new THREE.MeshStandardMaterial({
+        color: 0xf59e0b,
+        emissive: 0xf59e0b,
+        emissiveIntensity: 1.4,
+      }),
+    );
     for (const sx of [-r.width * 0.5, r.width * 0.5]) {
       const rail = new THREE.Mesh(railGeo, rampSteelMat);
       rail.position.set(sx, r.height * 0.48, 0);
       rail.rotation.x = -Math.atan2(r.height, r.length);
       rGroup.add(rail);
+
+      const led = new THREE.Mesh(track(new THREE.BoxGeometry(0.1, 0.14, r.length)), ledEdgeMat);
+      led.position.set(sx, r.height * 0.58, 0);
+      led.rotation.x = -Math.atan2(r.height, r.length);
+      rGroup.add(led);
+    }
+
+    // Steel lip support columns at takeoff edge
+    const colGeo = track(new THREE.CylinderGeometry(0.22, 0.28, r.height + 0.5, 8));
+    for (const sx of [-r.width * 0.42, 0, r.width * 0.42]) {
+      const col = new THREE.Mesh(colGeo, rampSteelMat);
+      col.position.set(sx, r.height * 0.46, r.length * 0.44);
+      rGroup.add(col);
     }
 
     group.add(rGroup);
@@ -1182,6 +1388,8 @@ export function createWorldVisualRig(
   group.add(coinInst);
   group.add(coinRimInst);
 
+  let lastCoinAnimTime = -1;
+
   return {
     group,
     roadMaterial,
@@ -1241,36 +1449,41 @@ export function createWorldVisualRig(
       grassUniforms.uTime.value = elapsed;
       grassUniforms.uWind.value = weather.windStrength;
 
-      roadMaterial.clearcoat = weather.wetness * 0.95;
-      roadMaterial.roughness = lerp(0.84, 0.18, weather.wetness);
-      roadMaterial.envMapIntensity = lerp(0.22, 0.95, weather.wetness);
+      roadMaterial.roughness = lerp(0.72, 0.16, weather.wetness);
+      roadMaterial.envMapIntensity = lerp(0.36, 1.05, weather.wetness);
+      highwayMaterial.roughness = lerp(0.74, 0.16, weather.wetness);
+      highwayMaterial.envMapIntensity = lerp(0.34, 1.05, weather.wetness);
 
       for (const b of beacons) {
         b.crystalMesh.rotation.y = elapsed * 1.4;
         b.crystalMesh.position.y = 2.8 + Math.sin(elapsed * 2.2) * 0.35;
       }
 
-      let coinsDirty = false;
-      for (let i = 0; i < world.coins.length; i++) {
-        if (coinCollected[i]) continue;
-        coinsDirty = true;
-        const c = world.coins[i];
-        dummy.position.set(c.x, c.y + Math.sin(elapsed * 3.0 + i) * 0.22, c.z);
-        dummy.rotation.set(0, elapsed * 2.4 + i * 0.5, 0);
-        dummy.scale.setScalar(1);
-        dummy.updateMatrix();
-        coinInst.setMatrixAt(i, dummy.matrix);
-        coinRimInst.setMatrixAt(i, dummy.matrix);
-      }
-      if (coinsDirty) {
-        coinInst.instanceMatrix.needsUpdate = true;
-        coinRimInst.instanceMatrix.needsUpdate = true;
+      if (elapsed - lastCoinAnimTime >= 0.05) {
+        lastCoinAnimTime = elapsed;
+        let coinsDirty = false;
+        for (let i = 0; i < world.coins.length; i++) {
+          if (coinCollected[i]) continue;
+          coinsDirty = true;
+          const c = world.coins[i];
+          dummy.position.set(c.x, c.y + Math.sin(elapsed * 3.0 + i) * 0.22, c.z);
+          dummy.rotation.set(0, elapsed * 2.4 + i * 0.5, 0);
+          dummy.scale.setScalar(1);
+          dummy.updateMatrix();
+          coinInst.setMatrixAt(i, dummy.matrix);
+          coinRimInst.setMatrixAt(i, dummy.matrix);
+        }
+        if (coinsDirty) {
+          coinInst.instanceMatrix.needsUpdate = true;
+          coinRimInst.instanceMatrix.needsUpdate = true;
+        }
       }
 
       const bladeSpeed = 1.2 + weather.windStrength * 2.6;
       for (let i = 0; i < turbineRotors.length; i++) {
         turbineRotors[i].rotation.z = elapsed * bladeSpeed + i * 0.7;
       }
+      lsStructures.updateAnimatedProps(elapsed);
     },
     markBeaconDiscovered: (id: string) => {
       const b = beacons.find((item) => item.id === id);

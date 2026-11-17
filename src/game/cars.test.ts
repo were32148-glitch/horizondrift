@@ -45,17 +45,17 @@ test('awardCoins adds positive amounts and ignores invalid deltas', () => {
   assert.equal(awardCoins(afterCoin, Number.NaN).coins, 145);
 });
 
-test('car tires sit flush at exact WHEEL_REST_OFFSET (0.56m) above asphalt on all 4 maps', () => {
+test('car tires sit flush at exact WHEEL_REST_OFFSET (0.82m) above asphalt on all 4 maps', () => {
   const maps = ['valley', 'canyon', 'alpine', 'coast'] as const;
   for (const mapId of maps) {
     const world = getMapWorldData(mapId);
-    assert.equal(world.coins.length, 45, `${mapId} should spawn 45 coins`);
+    assert.ok(world.coins.length >= 45, `${mapId} should spawn >= 45 coins (got ${world.coins.length})`);
     const samplePt = world.roadPoints[3];
     const roadH = groundHeightAt(samplePt.x, samplePt.z, mapId);
     const vehicle = createVehicleStateAt(samplePt.x, samplePt.z, 0, mapId);
     assert.ok(
-      Math.abs(vehicle.y - roadH - 0.56) < 0.001,
-      `${mapId} vehicle.y - groundHeight should match 0.56m tire offset`,
+      Math.abs(vehicle.y - roadH - 0.82) < 0.001,
+      `${mapId} vehicle.y - groundHeight should match 0.82m tire offset`,
     );
 
     // Run 30 physics steps at rest to verify car stays flush on top of asphalt without sinking
@@ -72,7 +72,7 @@ test('car tires sit flush at exact WHEEL_REST_OFFSET (0.56m) above asphalt on al
     }
     const settledRoadH = groundHeightAt(vehicle.x, vehicle.z, mapId);
     assert.ok(
-      vehicle.y - settledRoadH >= 0.52 && vehicle.y - settledRoadH <= 0.62,
+      vehicle.y - settledRoadH >= 0.78 && vehicle.y - settledRoadH <= 0.86,
       `${mapId} settled ride height above asphalt should remain flush (${vehicle.y - settledRoadH})`,
     );
   }

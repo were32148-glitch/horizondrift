@@ -17,6 +17,7 @@ export interface WeatherAndParticleRig {
 const RAIN_COUNT = 1400;
 const SNOW_COUNT = 1100;
 const DUST_POOL_SIZE = 180;
+const SKID_POOL_SIZE = 220;
 
 interface DustParticle {
   active: boolean;
@@ -59,7 +60,7 @@ export function createWeatherAndParticleRig(
     uTime: { value: 0.0 },
   };
 
-  const skyGeo = track(new THREE.SphereGeometry(960, 28, 18));
+  const skyGeo = track(new THREE.SphereGeometry(960, 32, 20));
   const skyMat = track(
     new THREE.ShaderMaterial({
       uniforms: skyUniforms,
@@ -90,24 +91,68 @@ export function createWeatherAndParticleRig(
           return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
         }
 
+        float hash2(vec2 p) {
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 45.32);
+          return fract(p.x * p.y);
+        }
+
+        float noise2(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = hash2(i);
+          float b = hash2(i + vec2(1.0, 0.0));
+          float c = hash2(i + vec2(0.0, 1.0));
+          float d = hash2(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+
+        float fbmClouds(vec2 p) {
+          float v = 0.0;
+          float a = 0.52;
+          for (int i = 0; i < 3; i++) {
+            v += a * noise2(p);
+            p = p * 2.06 + vec2(1.7, 9.2);
+            a *= 0.5;
+          }
+          return v;
+        }
+
         void main() {
           vec3 dir = normalize(vWorldDir);
           float h = clamp(dir.y, 0.0, 1.0);
-          vec3 col = mix(uHorizonColor, uTopColor, pow(h, 0.55));
+          vec3 col = mix(uHorizonColor, uTopColor, pow(h, 0.52));
 
-          // Sun / Moon disc & atmospheric scattering halo
-          float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
-          float halo = pow(sunDot, 12.0) * 0.35 * uSunIntensity;
-          float disc = smoothstep(0.996, 0.9992, sunDot) * 1.4 * uSunIntensity;
-          col += vec3(1.0, 0.92, 0.78) * (halo + disc);
+          // Sun / Moon disc & Mie atmospheric scattering halo
+          vec3 sDir = normalize(uSunDir);
+          float sunDot = max(dot(dir, sDir), 0.0);
+          float mieHalo = pow(sunDot, 7.0) * 0.38 * uSunIntensity;
+          float coreGlow = pow(sunDot, 48.0) * 0.45 * uSunIntensity;
+          float disc = smoothstep(0.9965, 0.9993, sunDot) * 1.5 * uSunIntensity;
+          vec3 sunTint = mix(vec3(1.0, 0.88, 0.68), vec3(0.75, 0.86, 1.0), uNightFactor);
+          col += sunTint * (mieHalo + coreGlow + disc);
+          // Horizon golden atmospheric belt
+          col += vec3(0.98, 0.72, 0.45) * pow(1.0 - h, 5.5) * 0.16 * (1.0 - uNightFactor) * uSunIntensity;
+
+          // Procedural drifting cloud deck above horizon (3-octave fast FBM)
+          if (dir.y > 0.03) {
+            vec2 cloudUv = dir.xz / (dir.y + 0.16) * 1.35 + vec2(uTime * 0.009, uTime * 0.004);
+            float cNoise = fbmClouds(cloudUv);
+            float cMask = smoothstep(0.45, 0.78, cNoise) * smoothstep(0.03, 0.22, dir.y);
+            vec3 cloudLit = mix(vec3(1.0, 0.98, 0.95), uHorizonColor * 1.15, 0.28);
+            cloudLit = mix(cloudLit, vec3(0.24, 0.30, 0.42), uNightFactor * 0.82);
+            cloudLit += sunTint * pow(sunDot, 5.0) * 0.35 * (1.0 - uNightFactor * 0.7);
+            col = mix(col, cloudLit, cMask * 0.62);
+          }
 
           // Procedural stars at night
           if (uNightFactor > 0.05 && h > 0.08) {
-            vec3 starCell = floor(dir * 190.0);
+            vec3 starCell = floor(dir * 210.0);
             float s = hash(starCell);
-            if (s > 0.992) {
+            if (s > 0.991) {
               float twinkle = 0.6 + 0.4 * sin(uTime * 3.0 + s * 100.0);
-              col += vec3(0.85, 0.92, 1.0) * twinkle * uNightFactor * smoothstep(0.08, 0.3, h);
+              col += vec3(0.88, 0.94, 1.0) * twinkle * uNightFactor * smoothstep(0.08, 0.3, h);
             }
           }
 
@@ -219,6 +264,34 @@ export function createWeatherAndParticleRig(
 
   let dustCursor = 0;
   let emitAccum = 0;
+
+  // --- 5. Zero-GC Instanced Tire Drift Skid Marks & Offroad Tracks ---
+  const skidGeo = track(new THREE.PlaneGeometry(0.48, 1.6));
+  skidGeo.rotateX(-Math.PI / 2);
+  const skidMat = track(
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.44,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+    }),
+  );
+  const skidInst = new THREE.InstancedMesh(skidGeo, skidMat, SKID_POOL_SIZE);
+  skidInst.frustumCulled = false;
+  for (let i = 0; i < SKID_POOL_SIZE; i++) {
+    _dummy.position.set(0, -500, 0);
+    _dummy.scale.setScalar(0.001);
+    _dummy.updateMatrix();
+    skidInst.setMatrixAt(i, _dummy.matrix);
+    skidInst.setColorAt(i, _tmpColor.setHex(0x0f172a));
+  }
+  skidInst.instanceMatrix.needsUpdate = true;
+  if (skidInst.instanceColor) skidInst.instanceColor.needsUpdate = true;
+  scene.add(skidInst);
+  let skidCursor = 0;
+  let skidTimer = 0;
 
   const spawnDust = (
     x: number,
@@ -450,6 +523,45 @@ export function createWeatherAndParticleRig(
       if (anyDustDirty) {
         dustInst.instanceMatrix.needsUpdate = true;
         if (dustInst.instanceColor) dustInst.instanceColor.needsUpdate = true;
+      }
+
+      // 5. Lay Tire Drift Skid Marks & Offroad Tracks cleanly in 1 InstancedMesh call
+      skidTimer += dt;
+      if (skidTimer >= 0.045) {
+        skidTimer = 0;
+        let skidDirty = false;
+        for (let vIdx = 0; vIdx < vehicles.length; vIdx++) {
+          const v = vehicles[vIdx];
+          if (v.groundedCount < 2 || v.surface === 'water') continue;
+          const speedAbs = Math.abs(v.speed);
+          if (!v.isDrifting && (v.surface === 'asphalt' || speedAbs < 11)) continue;
+          const sinY = Math.sin(v.yaw);
+          const cosY = Math.cos(v.yaw);
+          const markHex =
+            v.surface === 'asphalt' || v.surface === 'concrete'
+              ? 0x0b0f17
+              : v.surface === 'snow'
+                ? 0x94a3b8
+                : 0x3f2c1b;
+          _tmpColor.setHex(markHex);
+          const trackY = v.y - 0.77;
+          for (const side of [-0.94, 0.94]) {
+            const wx = v.x + cosY * side - sinY * 1.42;
+            const wz = v.z - sinY * side - cosY * 1.42;
+            _dummy.position.set(wx, trackY, wz);
+            _dummy.rotation.set(0, v.yaw, 0);
+            _dummy.scale.set(1, 1, Math.min(1.8, Math.max(0.75, speedAbs / 24)));
+            _dummy.updateMatrix();
+            skidInst.setMatrixAt(skidCursor, _dummy.matrix);
+            skidInst.setColorAt(skidCursor, _tmpColor);
+            skidCursor = (skidCursor + 1) % SKID_POOL_SIZE;
+            skidDirty = true;
+          }
+        }
+        if (skidDirty) {
+          skidInst.instanceMatrix.needsUpdate = true;
+          if (skidInst.instanceColor) skidInst.instanceColor.needsUpdate = true;
+        }
       }
     },
     dispose: () => {

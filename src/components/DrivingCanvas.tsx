@@ -1,17 +1,24 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { ProceduralAudioEngine } from '../game/audio';
 import { createCarVisualRig, type CarVisualRig } from '../game/carModel';
 import { getCarSpec } from '../game/cars';
 import {
+  FREESTYLE_TRAFFIC_VARIANTS,
+  FreestyleTrafficController,
+} from '../game/freestyleTraffic';
+import { type HitReactionEvent, LivingWorldController } from '../game/livingWorld';
+import {
   buildRaceStandings,
   computeAiVehicleInput,
+  computeTeamScores,
   createRaceGrid,
   stepRaceProgress,
 } from '../game/raceLogic';
 import {
   clamp,
+  getDrivableSurfaceHeight,
   getMapWorldData,
   groundHeightAt,
   lerp,
@@ -20,16 +27,20 @@ import { createProceduralTextures } from '../game/textures';
 import type {
   CameraMode,
   CarId,
+  CharacterId,
   GameMode,
   GamePhase,
   HudSnapshot,
+  LobbyState,
   MapId,
   PlayerHudInfo,
   RacerRuntime,
   RaceStandingSummary,
+  RemotePlayerSnapshot,
   VehicleInput,
   VehicleState,
   WeatherPreset,
+  WeaponId,
 } from '../game/types';
 import {
   ObstacleGrid,
@@ -43,6 +54,7 @@ import { createWorldVisualRig, type WorldVisualRig } from '../game/worldBuilder'
 export interface DrivingControllerHandle {
   resetCar: () => void;
   resetRace: () => void;
+  teleportToZone: (x: number, z: number, yaw: number) => void;
   setWeatherPreset: (preset: WeatherPreset) => void;
   cycleWeather: () => void;
   setCameraMode: (mode: CameraMode) => void;
@@ -51,6 +63,7 @@ export interface DrivingControllerHandle {
   setPaintColor: (hex: number) => void;
   toggleMute: () => boolean;
   initAudio: () => void;
+  toggleOnFoot: () => void;
 }
 
 interface DrivingCanvasProps {
@@ -60,11 +73,22 @@ interface DrivingCanvasProps {
   carIdP1: CarId;
   carIdP2: CarId;
   totalCoins: number;
+  lobbyState: LobbyState | null;
+  localClientId: string | null;
+  remoteSnapshots: RemotePlayerSnapshot[];
+  isOnFoot: boolean;
+  onToggleOnFoot: () => void;
+  characterHealth: number;
+  wantedLevel: number;
+  equippedCharacter: CharacterId;
+  equippedWeapon: WeaponId;
   onHudUpdate: (hud: HudSnapshot) => void;
   onPhaseHotkey: (action: 'pause' | 'start' | 'mute') => void;
   onBeaconFound: (name: string) => void;
   onCoinsEarned: (amount: number, label: string) => void;
   onRaceFinished: (standings: RaceStandingSummary[]) => void;
+  onSendSnapshot?: (snapshot: RemotePlayerSnapshot) => void;
+  onReactionEvent?: (evt: HitReactionEvent) => void;
 }
 
 const CAMERA_ORDER: CameraMode[] = ['chase', 'drift', 'hood'];
@@ -82,6 +106,13 @@ function zeroInput(out: VehicleInput) {
   out.boost = false;
 }
 
+function lerpAngle(a: number, b: number, t: number): number {
+  let diff = b - a;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return a + diff * t;
+}
+
 export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasProps>(
   function DrivingCanvas(
     {
@@ -91,18 +122,31 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       carIdP1,
       carIdP2,
       totalCoins,
+      lobbyState,
+      localClientId,
+      remoteSnapshots,
+      isOnFoot,
+      onToggleOnFoot,
+      characterHealth,
+      wantedLevel,
+      equippedCharacter,
+      equippedWeapon,
       onHudUpdate,
       onPhaseHotkey,
       onBeaconFound,
       onCoinsEarned,
       onRaceFinished,
+      onSendSnapshot,
+      onReactionEvent,
     },
     ref,
   ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
     const phaseRef = useRef<GamePhase>(phase);
-    const prevPhaseRef = useRef<GamePhase>(phase);
     const totalCoinsRef = useRef<number>(totalCoins);
+    const lobbyRef = useRef<LobbyState | null>(lobbyState);
+    const localClientIdRef = useRef<string | null>(localClientId);
+    const remoteSnapshotsRef = useRef<RemotePlayerSnapshot[]>(remoteSnapshots);
     const carSpecsRef = useRef({
       p1: getCarSpec(carIdP1),
       p2: getCarSpec(carIdP2),
@@ -113,97 +157,141 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       onBeaconFound,
       onCoinsEarned,
       onRaceFinished,
+      onSendSnapshot,
+      onReactionEvent,
+      onToggleOnFoot,
     });
 
     phaseRef.current = phase;
     totalCoinsRef.current = totalCoins;
+    lobbyRef.current = lobbyState;
+    localClientIdRef.current = localClientId;
+    remoteSnapshotsRef.current = remoteSnapshots;
     callbacksRef.current = {
       onHudUpdate,
       onPhaseHotkey,
       onBeaconFound,
       onCoinsEarned,
       onRaceFinished,
+      onSendSnapshot,
+      onReactionEvent,
+      onToggleOnFoot,
     };
 
     const audioRef = useRef<ProceduralAudioEngine | null>(null);
     const worldRigRef = useRef<WorldVisualRig | null>(null);
     const carRigsRef = useRef<CarVisualRig[]>([]);
+    const freestyleTrafficRef = useRef<FreestyleTrafficController | null>(null);
     const snapRaceCamerasRef = useRef<(() => void) | null>(null);
-    const worldData = getMapWorldData(mapId);
+    const worldData = useMemo(() => getMapWorldData(mapId), [mapId]);
 
-    const simStateRef = useRef({
-      racers: createRaceGrid(mode, mapId),
-      weather: createInitialWeatherState(worldData.config.defaultWeather),
-      cameraMode: 'chase' as CameraMode,
-      discovered: new Set<string>(),
-      collectedCoins: new Set<number>(),
-      runCoins: 0,
-      manualHeadlights: null as boolean | null,
-      paintHex: getCarSpec(carIdP1).paintHex,
-      countdownSeconds: mode === 'freestyle' ? 0 : 2.4,
-      raceElapsed: 0,
-      raceFinishedSent: false,
-    });
+    const simStateRef = useRef<{
+      racers: RacerRuntime[];
+      weather: ReturnType<typeof createInitialWeatherState>;
+      cameraMode: CameraMode;
+      discovered: Set<string>;
+      collectedCoins: Set<number>;
+      runCoins: number;
+      manualHeadlights: boolean | null;
+      paintHex: number;
+      countdownSeconds: number;
+      raceElapsed: number;
+      raceFinishedSent: boolean;
+    } | null>(null);
+
+    if (!simStateRef.current) {
+      simStateRef.current = {
+        racers: createRaceGrid(mode, mapId, lobbyState, localClientId),
+        weather: createInitialWeatherState(
+          lobbyState?.weatherPreset ?? worldData.config.defaultWeather,
+        ),
+        cameraMode: 'chase' as CameraMode,
+        discovered: new Set<string>(),
+        collectedCoins: new Set<number>(),
+        runCoins: 0,
+        manualHeadlights: null as boolean | null,
+        paintHex: getCarSpec(carIdP1).paintHex,
+        countdownSeconds: mode === 'freestyle' ? 0 : 2.4,
+        raceElapsed: 0,
+        raceFinishedSent: false,
+      };
+    }
+
+    const sim = simStateRef.current;
 
     // Live-update car specs when user equips a car in the Garage
     useEffect(() => {
+      const simCur = simStateRef.current;
+      if (!simCur) return;
       const s1 = getCarSpec(carIdP1);
       const s2 = getCarSpec(carIdP2);
       carSpecsRef.current = { p1: s1, p2: s2 };
-      simStateRef.current.paintHex = s1.paintHex;
-      if (simStateRef.current.racers[0]) {
-        simStateRef.current.racers[0].profile.paintHex = s1.paintHex;
-        simStateRef.current.racers[0].profile.stripeHex = s1.stripeHex;
+      simCur.paintHex = s1.paintHex;
+      if (simCur.racers[0]) {
+        if (mode !== 'online_2v2') {
+          simCur.racers[0].profile.paintHex = s1.paintHex;
+        }
+        simCur.racers[0].profile.stripeHex = s1.stripeHex;
+        simCur.racers[0].profile.carId = s1.id;
       }
       carRigsRef.current[0]?.applyCarSpec(s1);
-      if (mode === 'race2p' && simStateRef.current.racers[1] && carRigsRef.current[1]) {
-        simStateRef.current.racers[1].profile.paintHex = s2.paintHex;
-        simStateRef.current.racers[1].profile.stripeHex = s2.stripeHex;
+      if (mode === 'online_2v2' && simCur.racers[0]) {
+        const tc = simCur.racers[0].profile.team === 'blue' ? 0x0284c7 : 0xe11d48;
+        carRigsRef.current[0]?.setPaintColor(tc);
+        carRigsRef.current[0]?.setTeamBadge(simCur.racers[0].profile.team);
+      }
+      if (mode === 'race2p' && simCur.racers[1] && carRigsRef.current[1]) {
+        simCur.racers[1].profile.paintHex = s2.paintHex;
+        simCur.racers[1].profile.stripeHex = s2.stripeHex;
         carRigsRef.current[1].applyCarSpec(s2);
       }
     }, [carIdP1, carIdP2, mode]);
 
     const resetRaceState = () => {
-      const freshRacers = createRaceGrid(mode, mapId);
+      const simCur = simStateRef.current;
+      if (!simCur) return;
+      const freshRacers = createRaceGrid(
+        mode,
+        mapId,
+        lobbyRef.current,
+        localClientIdRef.current,
+      );
       const s1 = carSpecsRef.current.p1;
       const s2 = carSpecsRef.current.p2;
-      freshRacers[0].profile.paintHex = simStateRef.current.paintHex;
+      if (mode !== 'online_2v2') {
+        freshRacers[0].profile.paintHex = simCur.paintHex;
+      }
       freshRacers[0].profile.stripeHex = s1.stripeHex;
+      freshRacers[0].profile.carId = s1.id;
+
       if (carRigsRef.current[0]) {
         carRigsRef.current[0].applyCarSpec(s1);
-        carRigsRef.current[0].setPaintColor(simStateRef.current.paintHex);
+        carRigsRef.current[0].setPaintColor(freshRacers[0].profile.paintHex);
+        carRigsRef.current[0].setTeamBadge(freshRacers[0].profile.team);
       }
       if (mode === 'race2p' && freshRacers[1]) {
         freshRacers[1].profile.paintHex = s2.paintHex;
         freshRacers[1].profile.stripeHex = s2.stripeHex;
         carRigsRef.current[1]?.applyCarSpec(s2);
       }
-      simStateRef.current.racers = freshRacers;
-      simStateRef.current.collectedCoins.clear();
-      simStateRef.current.runCoins = 0;
+      simCur.racers = freshRacers;
+      simCur.collectedCoins.clear();
+      simCur.runCoins = 0;
       worldRigRef.current?.resetCoins();
-      simStateRef.current.countdownSeconds = mode === 'freestyle' ? 0 : 2.4;
-      simStateRef.current.raceElapsed = 0;
-      simStateRef.current.raceFinishedSent = false;
+      freestyleTrafficRef.current?.reset();
+      simCur.countdownSeconds = mode === 'freestyle' ? 0 : 2.4;
+      simCur.raceElapsed = 0;
+      simCur.raceFinishedSent = false;
       snapRaceCamerasRef.current?.();
     };
-
-    // When entering playing from title or gameover, ensure countdown resets cleanly
-    if (prevPhaseRef.current !== phase) {
-      if (phase === 'playing' && (prevPhaseRef.current === 'title' || prevPhaseRef.current === 'gameover')) {
-        resetRaceState();
-      }
-      prevPhaseRef.current = phase;
-    }
 
     useImperativeHandle(ref, () => ({
       resetCar: () => {
         if (mode === 'freestyle') {
           resetRaceState();
         } else {
-          // Reset human player(s) back onto nearest road spline point
           const pts = worldData.roadPoints;
-          for (const r of simStateRef.current.racers) {
+          for (const r of sim.racers) {
             if (!r.profile.isHuman) continue;
             let bestIdx = 0;
             let bestD = Infinity;
@@ -222,7 +310,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
             const nz = Math.sin(yaw);
             r.vehicle.x = pt.x + nx * side;
             r.vehicle.z = pt.z + nz * side;
-            r.vehicle.y = groundHeightAt(r.vehicle.x, r.vehicle.z, mapId) + 0.5;
+            r.vehicle.y = getDrivableSurfaceHeight(r.vehicle.x, r.vehicle.z, r.vehicle.y, mapId).height + 0.82;
             r.vehicle.vx = 0;
             r.vehicle.vy = 0;
             r.vehicle.vz = 0;
@@ -234,33 +322,50 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       resetRace: () => {
         resetRaceState();
       },
+      teleportToZone: (x: number, z: number, yaw: number) => {
+        const r = sim.racers[0];
+        if (!r) return;
+        const groundY = getDrivableSurfaceHeight(x, z, 20, mapId).height;
+        r.vehicle.x = x;
+        r.vehicle.z = z;
+        r.vehicle.y = groundY + 0.82;
+        r.vehicle.vx = 0;
+        r.vehicle.vy = 0;
+        r.vehicle.vz = 0;
+        r.vehicle.speed = 0;
+        r.vehicle.speedKmh = 0;
+        r.vehicle.yaw = yaw;
+        r.vehicle.pitch = 0;
+        r.vehicle.roll = 0;
+        snapRaceCamerasRef.current?.();
+      },
       setWeatherPreset: (preset: WeatherPreset) => {
-        simStateRef.current.weather.preset = preset;
+        sim.weather.preset = preset;
       },
       cycleWeather: () => {
-        const cur = simStateRef.current.weather.preset;
+        const cur = sim.weather.preset;
         const idx = WEATHER_ORDER.indexOf(cur);
-        simStateRef.current.weather.preset = WEATHER_ORDER[(idx + 1) % WEATHER_ORDER.length];
+        sim.weather.preset = WEATHER_ORDER[(idx + 1) % WEATHER_ORDER.length];
       },
       setCameraMode: (cMode: CameraMode) => {
-        simStateRef.current.cameraMode = cMode;
+        sim.cameraMode = cMode;
       },
       cycleCameraMode: () => {
-        const cur = simStateRef.current.cameraMode;
+        const cur = sim.cameraMode;
         const idx = CAMERA_ORDER.indexOf(cur);
-        simStateRef.current.cameraMode = CAMERA_ORDER[(idx + 1) % CAMERA_ORDER.length];
+        sim.cameraMode = CAMERA_ORDER[(idx + 1) % CAMERA_ORDER.length];
       },
       toggleHeadlights: () => {
         const cur =
-          simStateRef.current.manualHeadlights !== null
-            ? simStateRef.current.manualHeadlights
-            : simStateRef.current.racers[0].vehicle.headlightsOn;
-        simStateRef.current.manualHeadlights = !cur;
+          sim.manualHeadlights !== null
+            ? sim.manualHeadlights
+            : sim.racers[0].vehicle.headlightsOn;
+        sim.manualHeadlights = !cur;
       },
       setPaintColor: (hex: number) => {
-        simStateRef.current.paintHex = hex;
-        if (simStateRef.current.racers[0]) {
-          simStateRef.current.racers[0].profile.paintHex = hex;
+        sim.paintHex = hex;
+        if (sim.racers[0]) {
+          sim.racers[0].profile.paintHex = hex;
         }
         carRigsRef.current[0]?.setPaintColor(hex);
       },
@@ -270,6 +375,9 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       },
       initAudio: () => {
         audioRef.current?.initOnGesture();
+      },
+      toggleOnFoot: () => {
+        callbacksRef.current.onToggleOnFoot?.();
       },
     }));
 
@@ -293,8 +401,9 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       });
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.08;
-      renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
+      renderer.toneMappingExposure = 1.12;
+      const maxDpr = mode === 'race2p' ? 1.2 : 1.35;
+      renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, maxDpr));
       const initW = container.clientWidth || window.innerWidth;
       const initH = container.clientHeight || window.innerHeight;
       renderer.setSize(initW, initH);
@@ -306,34 +415,40 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       container.appendChild(renderer.domElement);
 
       const scene = new THREE.Scene();
-      scene.fog = new THREE.FogExp2(0xb8d4ec, 0.0018);
+      scene.fog = new THREE.FogExp2(0xb8d4ec, 0.00085);
 
       const pmremGenerator = new THREE.PMREMGenerator(renderer);
       const envTexture = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
       scene.environment = envTexture;
       pmremGenerator.dispose();
 
-      const cameraP1 = new THREE.PerspectiveCamera(66, initW / initH, 0.25, 1650);
-      const cameraP2 = new THREE.PerspectiveCamera(66, initW / initH, 0.25, 1650);
+      // Balanced far clip (1350m) keeps skydome (960m) & horizon landmarks visible while cutting overdraw
+      const cameraP1 = new THREE.PerspectiveCamera(66, initW / initH, 0.25, 1350);
+      const cameraP2 = new THREE.PerspectiveCamera(66, initW / initH, 0.25, 1350);
 
-      const hemiLight = new THREE.HemisphereLight(0x87c2f8, 0x4e5638, 0.85);
+      const hemiLight = new THREE.HemisphereLight(0x87c2f8, 0x4e5638, 0.88);
       scene.add(hemiLight);
 
-      const sunLight = new THREE.DirectionalLight(0xffe8c2, 2.35);
+      const sunLight = new THREE.DirectionalLight(0xffe8c2, 2.45);
       sunLight.castShadow = !isSoftwareGl;
       sunLight.shadow.mapSize.width = 1024;
       sunLight.shadow.mapSize.height = 1024;
+      sunLight.shadow.radius = 2.0;
       sunLight.shadow.camera.near = 2;
-      sunLight.shadow.camera.far = 200;
+      sunLight.shadow.camera.far = 175;
       const d = 62;
       sunLight.shadow.camera.left = -d;
       sunLight.shadow.camera.right = d;
       sunLight.shadow.camera.top = d;
       sunLight.shadow.camera.bottom = -d;
-      sunLight.shadow.bias = -0.0005;
-      sunLight.shadow.normalBias = 0.02;
+      sunLight.shadow.bias = -0.0004;
+      sunLight.shadow.normalBias = 0.03;
       scene.add(sunLight);
       scene.add(sunLight.target);
+
+      const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.55);
+      scene.add(rimLight);
+      scene.add(rimLight.target);
 
       const textures = createProceduralTextures(renderer.capabilities.getMaxAnisotropy());
       const activeWorld = getMapWorldData(mapId);
@@ -343,8 +458,40 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       scene.add(worldRig.group);
       worldRigRef.current = worldRig;
 
+      const livingWorld = new LivingWorldController(mapId, mode);
+      scene.add(livingWorld.group);
+
+      const freestyleTraffic =
+        mode === 'freestyle'
+          ? new FreestyleTrafficController(mapId)
+          : null;
+      freestyleTrafficRef.current = freestyleTraffic;
+
+      const trafficRigs: CarVisualRig[] = [];
+      const lastTrafficVariants: number[] = [];
+      if (freestyleTraffic) {
+        for (let si = 0; si < freestyleTraffic.slots.length; si++) {
+          const vSpec = FREESTYLE_TRAFFIC_VARIANTS[si % FREESTYLE_TRAFFIC_VARIANTS.length];
+          const rig = createCarVisualRig(
+            textures,
+            isSoftwareGl,
+            vSpec.paintHex,
+            vSpec.stripeHex,
+            vSpec.numberLabel,
+            false,
+            vSpec.bodyStyle,
+            vSpec.rimHex,
+          );
+          rig.root.visible = false;
+          scene.add(rig.root);
+          trafficRigs.push(rig);
+          lastTrafficVariants.push(-1);
+        }
+      }
+
       const carRigs: CarVisualRig[] = [];
-      const initialRacers = simStateRef.current.racers;
+      const simInit = simStateRef.current!;
+      const initialRacers = simInit.racers;
       for (let i = 0; i < initialRacers.length; i++) {
         const p = initialRacers[i].profile;
         const spec =
@@ -352,8 +499,17 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
             ? carSpecsRef.current.p1
             : p.playerIndex === 1
               ? carSpecsRef.current.p2
-              : null;
-        const paint = i === 0 ? simStateRef.current.paintHex : spec ? spec.paintHex : p.paintHex;
+              : p.carId
+                ? getCarSpec(p.carId)
+                : null;
+        const paint =
+          mode === 'online_2v2'
+            ? p.paintHex
+            : i === 0
+              ? simInit.paintHex
+              : spec
+                ? spec.paintHex
+                : p.paintHex;
         const stripe = spec ? spec.stripeHex : p.stripeHex;
         const rig = createCarVisualRig(
           textures,
@@ -365,6 +521,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
           spec ? spec.bodyStyle : 'gt',
           spec ? spec.rimHex : 0xd9bc7e,
         );
+        rig.setTeamBadge(p.team);
         scene.add(rig.root);
         carRigs.push(rig);
       }
@@ -413,22 +570,27 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         audioEngine.initOnGesture();
 
         if (code === 'KeyC') {
-          const cur = simStateRef.current.cameraMode;
+          const curSim = simStateRef.current!;
+          const cur = curSim.cameraMode;
           const idx = CAMERA_ORDER.indexOf(cur);
-          simStateRef.current.cameraMode = CAMERA_ORDER[(idx + 1) % CAMERA_ORDER.length];
+          curSim.cameraMode = CAMERA_ORDER[(idx + 1) % CAMERA_ORDER.length];
         } else if (code === 'KeyV') {
-          const cur = simStateRef.current.weather.preset;
+          const curSim = simStateRef.current!;
+          const cur = curSim.weather.preset;
           const idx = WEATHER_ORDER.indexOf(cur);
-          simStateRef.current.weather.preset = WEATHER_ORDER[(idx + 1) % WEATHER_ORDER.length];
+          curSim.weather.preset = WEATHER_ORDER[(idx + 1) % WEATHER_ORDER.length];
         } else if (code === 'KeyL') {
+          const curSim = simStateRef.current!;
           const cur =
-            simStateRef.current.manualHeadlights !== null
-              ? simStateRef.current.manualHeadlights
-              : simStateRef.current.racers[0].vehicle.headlightsOn;
-          simStateRef.current.manualHeadlights = !cur;
+            curSim.manualHeadlights !== null
+              ? curSim.manualHeadlights
+              : curSim.racers[0].vehicle.headlightsOn;
+          curSim.manualHeadlights = !cur;
         } else if (code === 'KeyM') {
           audioEngine.toggleMute();
           callbacksRef.current.onPhaseHotkey('mute');
+        } else if (code === 'KeyE') {
+          callbacksRef.current.onToggleOnFoot?.();
         }
       };
 
@@ -463,27 +625,42 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       let lastTime = performance.now();
       let elapsed = 0;
       let lastHudPush = 0;
+      let lastNetPush = 0;
 
       const camLookP1 = new THREE.Vector3();
       const camLookP2 = new THREE.Vector3();
 
       const snapChaseCameras = () => {
-        const v1 = simStateRef.current.racers[0].vehicle;
+        const racersList = simStateRef.current!.racers;
+        const isSplit = mode === 'race2p' && racersList.length >= 2;
+        const snapHeight = isSplit ? 4.2 : 2.85;
+        const snapDist = isSplit ? 8.3 : 7.6;
+        const snapLookAhead = isSplit ? 8.5 : 4.5;
+        const snapLookY = isSplit ? 0.55 : 1.05;
+        const snapFov = isSplit ? 76 : 64;
+
+        if (isSplit) {
+          const halfW = Math.floor(viewW / 2);
+          cameraP1.aspect = halfW / Math.max(1, viewH);
+          cameraP2.aspect = (viewW - halfW) / Math.max(1, viewH);
+        }
+
+        const v1 = racersList[0].vehicle;
         const s1 = Math.sin(v1.yaw);
         const c1 = Math.cos(v1.yaw);
-        cameraP1.position.set(v1.x - s1 * 7.6, v1.y + 2.85, v1.z - c1 * 7.6);
-        camLookP1.set(v1.x + s1 * 4.5, v1.y + 1.05, v1.z + c1 * 4.5);
-        cameraP1.fov = 64;
+        cameraP1.position.set(v1.x - s1 * snapDist, v1.y + snapHeight, v1.z - c1 * snapDist);
+        camLookP1.set(v1.x + s1 * snapLookAhead, v1.y + snapLookY, v1.z + c1 * snapLookAhead);
+        cameraP1.fov = snapFov;
         cameraP1.updateProjectionMatrix();
         cameraP1.lookAt(camLookP1);
 
-        if (simStateRef.current.racers[1]) {
-          const v2 = simStateRef.current.racers[1].vehicle;
+        if (racersList[1]) {
+          const v2 = racersList[1].vehicle;
           const s2 = Math.sin(v2.yaw);
           const c2 = Math.cos(v2.yaw);
-          cameraP2.position.set(v2.x - s2 * 7.6, v2.y + 2.85, v2.z - c2 * 7.6);
-          camLookP2.set(v2.x + s2 * 4.5, v2.y + 1.05, v2.z + c2 * 4.5);
-          cameraP2.fov = 64;
+          cameraP2.position.set(v2.x - s2 * snapDist, v2.y + snapHeight, v2.z - c2 * snapDist);
+          camLookP2.set(v2.x + s2 * snapLookAhead, v2.y + snapLookY, v2.z + c2 * snapLookAhead);
+          cameraP2.fov = snapFov;
           cameraP2.updateProjectionMatrix();
           cameraP2.lookAt(camLookP2);
         }
@@ -492,7 +669,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
 
       // Snap initial camera poses cleanly
       {
-        const v1 = simStateRef.current.racers[0].vehicle;
+        const v1 = simStateRef.current!.racers[0].vehicle;
         const s1 = Math.sin(v1.yaw);
         const c1 = Math.cos(v1.yaw);
         if (phaseRef.current === 'title') {
@@ -525,17 +702,30 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       ) {
         const sinY = Math.sin(v.yaw);
         const cosY = Math.cos(v.yaw);
+        const isSplitView = cam.aspect < 1.15;
 
         if (cMode === 'hood') {
-          _camDesired.set(v.x + sinY * 0.55, v.y + 1.38, v.z + cosY * 0.55);
-          _camLookTarget.set(v.x + sinY * 18, v.y + 0.85 - v.pitch * 12, v.z + cosY * 18);
+          _camDesired.set(v.x + sinY * 0.55, v.y + (isSplitView ? 1.55 : 1.38), v.z + cosY * 0.55);
+          _camLookTarget.set(v.x + sinY * 18, v.y + (isSplitView ? 0.65 : 0.85) - v.pitch * 12, v.z + cosY * 18);
           cam.position.lerp(_camDesired, 1 - Math.exp(-26 * dt));
           lookVec.lerp(_camLookTarget, 1 - Math.exp(-24 * dt));
         } else {
           const isDriftCam = cMode === 'drift';
           const speedFrac = clamp(Math.abs(v.speed) / 48, 0, 1);
-          const followDist = isDriftCam ? 8.2 + speedFrac * 1.4 : 7.6 + speedFrac * 1.8;
-          const followHeight = isDriftCam ? 3.1 : 2.85;
+          const followDist = isSplitView
+            ? isDriftCam
+              ? 8.8 + speedFrac * 1.4
+              : 8.3 + speedFrac * 1.6
+            : isDriftCam
+              ? 8.2 + speedFrac * 1.4
+              : 7.6 + speedFrac * 1.8;
+          const followHeight = isSplitView
+            ? isDriftCam
+              ? 4.4
+              : 4.2
+            : isDriftCam
+              ? 3.1
+              : 2.85;
 
           let camYaw = v.yaw;
           if (isDriftCam && Math.hypot(v.vx, v.vz) > 5) {
@@ -553,20 +743,30 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
             v.y + followHeight,
             v.z - cCos * followDist,
           );
-          _camLookTarget.set(v.x + sinY * 4.5, v.y + 1.05, v.z + cosY * 4.5);
+          const lookAhead = isSplitView ? 8.5 : 4.5;
+          const lookY = isSplitView ? 0.55 : 1.05;
+          _camLookTarget.set(v.x + sinY * lookAhead, v.y + lookY, v.z + cosY * lookAhead);
 
-          cam.position.lerp(_camDesired, 1 - Math.exp(-8.8 * dt));
-          lookVec.lerp(_camLookTarget, 1 - Math.exp(-12.5 * dt));
+          cam.position.lerp(_camDesired, 1 - Math.exp(-14.5 * dt));
+          lookVec.lerp(_camLookTarget, 1 - Math.exp(-18.5 * dt));
         }
 
-        const camGround = groundHeightAt(cam.position.x, cam.position.z, mapId);
+        const camGround = getDrivableSurfaceHeight(cam.position.x, cam.position.z, v.y + 4, mapId).height;
         if (cam.position.y < camGround + 1.15) {
           cam.position.y = camGround + 1.15;
         }
 
-        const targetFov = 64 + clamp(v.speedKmh / 220, 0, 1) * 14 + (v.isBoosting ? 6 : 0);
+        if (v.isBoosting && v.speedKmh > 65) {
+          const shake = Math.min(0.035, (v.speedKmh - 65) * 0.00028);
+          cam.position.x += (Math.random() - 0.5) * shake;
+          cam.position.y += (Math.random() - 0.5) * shake * 0.7;
+        }
+
+        const baseFov = isSplitView ? 76 : 64;
+        const speedFov = isSplitView ? 10 : 14;
+        const targetFov = baseFov + clamp(v.speedKmh / 220, 0, 1) * speedFov + (v.isBoosting ? 5 : 0);
         if (Math.abs(cam.fov - targetFov) > 0.05) {
-          cam.fov = lerp(cam.fov, targetFov, 1 - Math.exp(-6 * dt));
+          cam.fov = lerp(cam.fov, targetFov, 1 - Math.exp(-8 * dt));
           cam.updateProjectionMatrix();
         }
         cam.lookAt(lookVec);
@@ -583,13 +783,13 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
           }
           const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
           if (state === gl.UNSIGNALED) {
-            frameId = window.setTimeout(poll, 4);
+            frameId = window.setTimeout(poll, 2);
           } else {
             if (sync) gl.deleteSync(sync);
-            frameId = window.setTimeout(cb, 12);
+            frameId = window.setTimeout(cb, 2);
           }
         };
-        frameId = window.setTimeout(poll, 4);
+        frameId = window.setTimeout(poll, 2);
       }
 
       const tick = () => {
@@ -600,27 +800,27 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
         elapsed += dt;
 
-        const sim = simStateRef.current;
+        const simCur = simStateRef.current!;
         const curPhase = phaseRef.current;
-        const racers = sim.racers;
+        const racers = simCur.racers;
 
         if (curPhase !== 'paused') {
-          stepWeatherState(sim.weather, dt, Math.random());
+          stepWeatherState(simCur.weather, dt, Math.random());
         }
 
         // Countdown & Race Physics
         if (curPhase === 'playing') {
           const isRace = mode !== 'freestyle';
           const countdownDt = Math.min(Math.max(rawDt, 0.001), 0.4);
-          if (isRace && sim.countdownSeconds > 0) {
-            sim.countdownSeconds = Math.max(0, sim.countdownSeconds - countdownDt);
-            const lit = clamp(Math.ceil((2.4 - sim.countdownSeconds) * 2.1), 1, 5);
+          if (isRace && simCur.countdownSeconds > 0) {
+            simCur.countdownSeconds = Math.max(0, simCur.countdownSeconds - countdownDt);
+            const lit = clamp(Math.ceil((2.4 - simCur.countdownSeconds) * 2.1), 1, 5);
             worldRig.setCountdownLights('red', lit);
             for (let i = 0; i < racerInputs.length; i++) zeroInput(racerInputs[i]);
           } else {
             if (isRace) {
-              sim.raceElapsed += dt;
-              if (sim.raceElapsed < 1.8) {
+              simCur.raceElapsed += dt;
+              if (simCur.raceElapsed < 1.8) {
                 worldRig.setCountdownLights('go');
               } else {
                 worldRig.setCountdownLights('off');
@@ -629,10 +829,14 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
               worldRig.setCountdownLights('off');
             }
 
-            // Compute inputs for each racer
+            // Compute inputs for each local/AI racer
             for (let i = 0; i < racers.length; i++) {
               const r = racers[i];
               const inp = racerInputs[i];
+              if (r.profile.isRemote) {
+                zeroInput(inp);
+                continue;
+              }
               if (r.profile.playerIndex === 0) {
                 const allowArrowsAlso = mode !== 'race2p';
                 const up = keysDown.has('KeyW') || (allowArrowsAlso && keysDown.has('ArrowUp'));
@@ -659,55 +863,149 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
               }
             }
 
-            // Step physics for all racers
+            // Step physics for local & AI racers, or sync remote snapshots
             allVehiclesScratch.length = 0;
+            const snaps = remoteSnapshotsRef.current;
+            const snapAlpha = 1 - Math.exp(-16 * dt);
+
             for (let i = 0; i < racers.length; i++) {
-              const pIdx = racers[i].profile.playerIndex;
+              const r = racers[i];
+              if (r.profile.isRemote) {
+                const match = snaps.find((s) => s.clientId === r.profile.id);
+                if (match) {
+                  r.vehicle.x = lerp(r.vehicle.x, match.x, snapAlpha);
+                  r.vehicle.y = lerp(r.vehicle.y, match.y, snapAlpha);
+                  r.vehicle.z = lerp(r.vehicle.z, match.z, snapAlpha);
+                  r.vehicle.vx = match.vx;
+                  r.vehicle.vy = match.vy;
+                  r.vehicle.vz = match.vz;
+                  r.vehicle.yaw = lerpAngle(r.vehicle.yaw, match.yaw, snapAlpha);
+                  r.vehicle.pitch = lerp(r.vehicle.pitch, match.pitch, snapAlpha);
+                  r.vehicle.roll = lerp(r.vehicle.roll, match.roll, snapAlpha);
+                  r.vehicle.steerAngle = match.steerAngle;
+                  r.vehicle.speedKmh = match.speedKmh;
+                  r.vehicle.speed = match.speedKmh / 3.6;
+                  r.vehicle.isBoosting = match.isBoosting;
+                  r.lap = match.lap;
+                  r.finished = match.finished;
+                  r.finishTime = match.finishTime;
+                  r.progressScore = match.progressScore;
+                  for (let w = 0; w < 4; w++) {
+                    r.vehicle.wheels[w].spinAngle += (r.vehicle.speed * dt) / 0.72;
+                    if (w < 2) r.vehicle.wheels[w].steerAngle = match.steerAngle;
+                  }
+                }
+                allVehiclesScratch.push(r.vehicle);
+                continue;
+              }
+
+              const pIdx = r.profile.playerIndex;
               const spec =
                 pIdx === 0
                   ? carSpecsRef.current.p1
                   : pIdx === 1
                     ? carSpecsRef.current.p2
-                    : undefined;
+                    : r.profile.carId
+                      ? getCarSpec(r.profile.carId)
+                      : undefined;
               stepVehiclePhysics(
-                racers[i].vehicle,
+                r.vehicle,
                 racerInputs[i],
                 obstacleGrid,
-                sim.weather,
+                simCur.weather,
                 dt,
                 mapId,
                 spec,
               );
-              allVehiclesScratch.push(racers[i].vehicle);
+              allVehiclesScratch.push(r.vehicle);
+            }
+
+            if (freestyleTraffic && racers[0]) {
+              freestyleTraffic.update(dt, racers[0].vehicle, activeWorld);
+              for (let si = 0; si < freestyleTraffic.slots.length; si++) {
+                const slot = freestyleTraffic.slots[si];
+                if (slot.active) {
+                  allVehiclesScratch.push(slot.vehicle);
+                }
+              }
             }
 
             resolveCarToCarCollisions(allVehiclesScratch);
 
+            // Step Humans & 23 Animal Species AI + Reactions
+            livingWorld.update(dt, elapsed, allVehiclesScratch, (evt) => {
+              audioEngine.playReactionSound(evt.sound);
+              if (evt.coinsAwarded && evt.coinsAwarded > 0) {
+                simCur.runCoins += evt.coinsAwarded;
+                audioEngine.playCoinChime();
+                callbacksRef.current.onCoinsEarned(
+                  evt.coinsAwarded,
+                  `+${evt.coinsAwarded} COINS · ${evt.label.toUpperCase()}`,
+                );
+              }
+              callbacksRef.current.onReactionEvent?.(evt);
+            });
+
             if (isRace) {
-              stepRaceProgress(racers, activeWorld, sim.raceElapsed);
-              const humanRacers = racers.filter((r) => r.profile.isHuman);
+              stepRaceProgress(racers, activeWorld, simCur.raceElapsed);
+              const humanRacers = racers.filter((r) => r.profile.isHuman && !r.profile.isRemote);
               if (
-                !sim.raceFinishedSent &&
+                !simCur.raceFinishedSent &&
                 humanRacers.length > 0 &&
                 humanRacers.every((r) => r.finished)
               ) {
-                sim.raceFinishedSent = true;
+                simCur.raceFinishedSent = true;
                 callbacksRef.current.onRaceFinished(buildRaceStandings(racers));
               }
             }
 
-            // Gold Coin Pickup checks for human cars
+            // Broadcast local player snapshot for Online 2v2 / FFA at ~20Hz
+            if (
+              (mode === 'online_2v2' || mode === 'online_ffa') &&
+              lobbyRef.current &&
+              now - lastNetPush > 50
+            ) {
+              lastNetPush = now;
+              const p0 = racers[0];
+              if (p0) {
+                callbacksRef.current.onSendSnapshot?.({
+                  clientId: localClientIdRef.current ?? p0.profile.id,
+                  name: p0.profile.name,
+                  carId: carSpecsRef.current.p1.id,
+                  team: p0.profile.team ?? 'ffa',
+                  x: p0.vehicle.x,
+                  y: p0.vehicle.y,
+                  z: p0.vehicle.z,
+                  vx: p0.vehicle.vx,
+                  vy: p0.vehicle.vy,
+                  vz: p0.vehicle.vz,
+                  yaw: p0.vehicle.yaw,
+                  pitch: p0.vehicle.pitch,
+                  roll: p0.vehicle.roll,
+                  steerAngle: p0.vehicle.steerAngle,
+                  speedKmh: p0.vehicle.speedKmh,
+                  isBoosting: p0.vehicle.isBoosting,
+                  lap: p0.lap,
+                  place: p0.place,
+                  finished: p0.finished,
+                  finishTime: p0.finishTime,
+                  progressScore: p0.progressScore,
+                });
+              }
+            }
+
+            // Gold Coin Pickup checks for local human cars
             for (let ci = 0; ci < activeWorld.coins.length; ci++) {
-              if (sim.collectedCoins.has(ci)) continue;
+              if (simCur.collectedCoins.has(ci)) continue;
               const coin = activeWorld.coins[ci];
               for (const r of racers) {
-                if (!r.profile.isHuman) continue;
+                if (!r.profile.isHuman || r.profile.isRemote) continue;
                 const dx = r.vehicle.x - coin.x;
                 const dz = r.vehicle.z - coin.z;
                 const dy = r.vehicle.y - coin.y;
                 if (dx * dx + dz * dz <= 4.3 * 4.3 && Math.abs(dy) <= 3.6) {
-                  sim.collectedCoins.add(ci);
-                  sim.runCoins += coin.value;
+                  simCur.collectedCoins.add(ci);
+                  simCur.runCoins += coin.value;
                   worldRig.collectCoin(ci);
                   audioEngine.playCoinChime();
                   callbacksRef.current.onCoinsEarned(coin.value, `+${coin.value} COINS`);
@@ -716,13 +1014,13 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
               }
             }
 
-            // Exploration Beacons check for human cars
+            // Exploration Beacons check for local human cars
             for (const b of activeWorld.beacons) {
-              if (sim.discovered.has(b.id)) continue;
+              if (simCur.discovered.has(b.id)) continue;
               for (const r of racers) {
-                if (!r.profile.isHuman) continue;
+                if (!r.profile.isHuman || r.profile.isRemote) continue;
                 if (Math.hypot(r.vehicle.x - b.x, r.vehicle.z - b.z) <= b.radius) {
-                  sim.discovered.add(b.id);
+                  simCur.discovered.add(b.id);
                   worldRig.markBeaconDiscovered(b.id);
                   audioEngine.playBeaconChime();
                   callbacksRef.current.onBeaconFound(b.name);
@@ -737,20 +1035,44 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         }
 
         // Sync visual car rigs & headlights
-        const autoLights = sim.weather.isDark || sim.weather.rainIntensity > 0.3;
+        const autoLights = simCur.weather.isDark || simCur.weather.rainIntensity > 0.3;
         allVehiclesScratch.length = 0;
+        const p1 = racers[0].vehicle;
         for (let i = 0; i < racers.length; i++) {
           const v = racers[i].vehicle;
-          v.headlightsOn = sim.manualHeadlights !== null ? sim.manualHeadlights : autoLights;
-          const gy = groundHeightAt(v.x, v.z, mapId);
+          v.headlightsOn = simCur.manualHeadlights !== null ? simCur.manualHeadlights : autoLights;
+          const nearPlayer = i === 0 || Math.hypot(v.x - p1.x, v.z - p1.z) < 260;
+          const gy = nearPlayer ? getDrivableSurfaceHeight(v.x, v.z, v.y, mapId).height : v.y - 0.82;
           carRigs[i].updateFromState(v, racerInputs[i], gy, elapsed);
           allVehiclesScratch.push(v);
         }
+        if (freestyleTraffic) {
+          for (let si = 0; si < freestyleTraffic.slots.length; si++) {
+            const slot = freestyleTraffic.slots[si];
+            const rig = trafficRigs[si];
+            if (!rig) continue;
+            rig.root.visible = slot.active;
+            if (slot.active) {
+              if (slot.variantIndex !== lastTrafficVariants[si]) {
+                lastTrafficVariants[si] = slot.variantIndex;
+                const vSpec = FREESTYLE_TRAFFIC_VARIANTS[slot.variantIndex];
+                rig.applyCarSpec(getCarSpec(vSpec.carId));
+                rig.setPaintColor(vSpec.paintHex);
+              }
+              const tv = slot.vehicle;
+              tv.headlightsOn = simCur.manualHeadlights !== null ? simCur.manualHeadlights : autoLights;
+              rig.updateFromState(tv, slot.input, tv.y - 0.82, elapsed);
+              allVehiclesScratch.push(tv);
+            }
+          }
+        }
+        if (curPhase !== 'playing' || (mode !== 'freestyle' && simCur.countdownSeconds > 0)) {
+          livingWorld.syncVisibility(allVehiclesScratch);
+        }
 
         // Lighting & Fog sync
-        const p1 = racers[0].vehicle;
-        const sunElev = sim.weather.sunElevation;
-        const sunAzim = sim.weather.sunAzimuth;
+        const sunElev = simCur.weather.sunElevation;
+        const sunAzim = simCur.weather.sunAzimuth;
         const sunR = Math.cos(sunElev);
         _sunPos.set(
           Math.sin(sunAzim) * sunR * 120,
@@ -761,17 +1083,22 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         sunLight.target.position.set(p1.x, p1.y, p1.z);
         sunLight.target.updateMatrixWorld();
 
-        const flashBoost = sim.weather.lightningFlash * 3.2;
-        sunLight.color.setHex(sim.weather.sunColorHex);
-        sunLight.intensity = sim.weather.sunIntensity + flashBoost;
+        rimLight.position.set(p1.x - _sunPos.x * 0.6, p1.y + 32, p1.z - _sunPos.z * 0.6);
+        rimLight.target.position.set(p1.x, p1.y, p1.z);
+        rimLight.target.updateMatrixWorld();
+        rimLight.intensity = simCur.weather.isDark ? 0.28 : 0.55;
 
-        hemiLight.color.setHex(sim.weather.hemiSkyHex);
-        hemiLight.groundColor.setHex(sim.weather.hemiGroundHex);
-        hemiLight.intensity = sim.weather.hemiIntensity + sim.weather.lightningFlash * 0.9;
+        const flashBoost = simCur.weather.lightningFlash * 3.2;
+        sunLight.color.setHex(simCur.weather.sunColorHex);
+        sunLight.intensity = simCur.weather.sunIntensity + flashBoost;
+
+        hemiLight.color.setHex(simCur.weather.hemiSkyHex);
+        hemiLight.groundColor.setHex(simCur.weather.hemiGroundHex);
+        hemiLight.intensity = simCur.weather.hemiIntensity + simCur.weather.lightningFlash * 0.9;
 
         const fog = scene.fog as THREE.FogExp2;
-        fog.color.setHex(sim.weather.fogColorHex);
-        fog.density = sim.weather.fogDensity * 0.72;
+        fog.color.setHex(simCur.weather.fogColorHex);
+        fog.density = simCur.weather.fogDensity * 0.45;
 
         // Cameras & Viewport Rendering
         const splitScreen = mode === 'race2p' && curPhase !== 'title' && racers.length >= 2;
@@ -808,20 +1135,20 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
             cameraP2.aspect = aspR;
             cameraP2.updateProjectionMatrix();
           }
-          updateFollowCamera(cameraP1, camLookP1, racers[0].vehicle, sim.cameraMode, dt);
-          updateFollowCamera(cameraP2, camLookP2, racers[1].vehicle, sim.cameraMode, dt);
+          updateFollowCamera(cameraP1, camLookP1, racers[0].vehicle, simCur.cameraMode, dt);
+          updateFollowCamera(cameraP2, camLookP2, racers[1].vehicle, simCur.cameraMode, dt);
         } else {
           const asp = viewW / Math.max(1, viewH);
           if (Math.abs(cameraP1.aspect - asp) > 0.01) {
             cameraP1.aspect = asp;
             cameraP1.updateProjectionMatrix();
           }
-          updateFollowCamera(cameraP1, camLookP1, p1, sim.cameraMode, dt);
+          updateFollowCamera(cameraP1, camLookP1, p1, simCur.cameraMode, dt);
         }
 
-        worldRig.updateEnvironmentVisuals(sim.weather, elapsed);
-        weatherRig.update(dt, elapsed, cameraP1.position, sim.weather, allVehiclesScratch);
-        audioEngine.update(p1, sim.weather, curPhase === 'playing');
+        worldRig.updateEnvironmentVisuals(simCur.weather, elapsed);
+        weatherRig.update(dt, elapsed, cameraP1.position, simCur.weather, allVehiclesScratch);
+        audioEngine.update(p1, simCur.weather, curPhase === 'playing');
 
         if (splitScreen) {
           const halfW = Math.floor(viewW / 2);
@@ -848,64 +1175,85 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         }
 
         // Throttled HUD update
-        if (now - lastHudPush > 80) {
+        if (now - lastHudPush > 95) {
           lastHudPush = now;
           const totalRacers = racers.length;
-          const players: PlayerHudInfo[] = racers
-            .filter((r: RacerRuntime) => r.profile.isHuman)
-            .map((r: RacerRuntime) => ({
-              name: r.profile.name,
-              carName:
-                r.profile.playerIndex === 0
-                  ? carSpecsRef.current.p1.name
-                  : carSpecsRef.current.p2.name,
-              speedKmh: r.vehicle.speedKmh,
-              rpm: Math.round(r.vehicle.rpm),
-              gear: r.vehicle.gear,
-              boostFuel: Math.round(r.vehicle.boostFuel),
-              isBoosting: r.vehicle.isBoosting,
-              isDrifting: r.vehicle.isDrifting,
-              totalDriftScore: Math.round(r.vehicle.totalDriftScore),
-              surface: r.vehicle.surface,
-              biome: r.vehicle.biome,
-              lap: r.lap,
-              totalLaps: activeWorld.config.totalLaps,
-              place: r.place,
-              totalRacers,
-              finished: r.finished,
-              finishTime: r.finishTime,
-              x: r.vehicle.x,
-              z: r.vehicle.z,
-              yaw: r.vehicle.yaw,
-            }));
-
-          const aiDots = racers
-            .filter((r: RacerRuntime) => !r.profile.isHuman)
-            .map((r: RacerRuntime) => ({
-              x: r.vehicle.x,
-              z: r.vehicle.z,
-              yaw: r.vehicle.yaw,
-              color: r.profile.paintHex,
-            }));
+          const players: PlayerHudInfo[] = [];
+          const aiDots: HudSnapshot['aiDots'] = [];
+          for (let i = 0; i < totalRacers; i++) {
+            const r = racers[i];
+            if (r.profile.isHuman) {
+              players.push({
+                name: r.profile.name,
+                carName:
+                  r.profile.playerIndex === 0
+                    ? carSpecsRef.current.p1.name
+                    : carSpecsRef.current.p2.name,
+                team: r.profile.team,
+                speedKmh: r.vehicle.speedKmh,
+                rpm: Math.round(r.vehicle.rpm),
+                gear: r.vehicle.gear,
+                boostFuel: Math.round(r.vehicle.boostFuel),
+                isBoosting: r.vehicle.isBoosting,
+                isDrifting: r.vehicle.isDrifting,
+                totalDriftScore: Math.round(r.vehicle.totalDriftScore),
+                airTime: Math.round(r.vehicle.airTime * 10) / 10,
+                surface: r.vehicle.surface,
+                biome: r.vehicle.biome,
+                lap: r.lap,
+                totalLaps: activeWorld.config.totalLaps,
+                place: r.place,
+                totalRacers,
+                finished: r.finished,
+                finishTime: r.finishTime,
+                x: r.vehicle.x,
+                z: r.vehicle.z,
+                yaw: r.vehicle.yaw,
+              });
+            } else {
+              aiDots.push({
+                x: r.vehicle.x,
+                z: r.vehicle.z,
+                yaw: r.vehicle.yaw,
+                color: r.profile.paintHex,
+                team: r.profile.team,
+              });
+            }
+          }
+          if (freestyleTraffic) {
+            for (let si = 0; si < freestyleTraffic.slots.length; si++) {
+              const slot = freestyleTraffic.slots[si];
+              if (!slot.active) continue;
+              const vSpec = FREESTYLE_TRAFFIC_VARIANTS[slot.variantIndex];
+              aiDots.push({
+                x: slot.vehicle.x,
+                z: slot.vehicle.z,
+                yaw: slot.vehicle.yaw,
+                color: vSpec.paintHex,
+              });
+            }
+          }
 
           callbacksRef.current.onHudUpdate({
             mode,
             mapId,
             mapName: activeWorld.config.name,
-            weatherCondition: sim.weather.condition,
-            weatherPreset: sim.weather.preset,
-            cameraMode: sim.cameraMode,
+            weatherCondition: simCur.weather.condition,
+            weatherPreset: simCur.weather.preset,
+            cameraMode: simCur.cameraMode,
             headlightsOn: p1.headlightsOn,
-            countdownSeconds: sim.countdownSeconds,
-            raceElapsed: sim.raceElapsed,
+            countdownSeconds: simCur.countdownSeconds,
+            raceElapsed: simCur.raceElapsed,
             players,
             aiDots,
-            standings: buildRaceStandings(racers),
-            beaconsFound: sim.discovered.size,
+            standings: mode === 'freestyle' ? [] : buildRaceStandings(racers),
+            beaconsFound: simCur.discovered.size,
             totalBeacons: activeWorld.beacons.length,
-            discoveredIds: Array.from(sim.discovered),
+            discoveredIds: Array.from(simCur.discovered),
             totalCoins: totalCoinsRef.current,
-            runCoins: sim.runCoins,
+            runCoins: simCur.runCoins,
+            lobbyCode: lobbyRef.current?.code ?? null,
+            teamScores: mode === 'online_2v2' ? computeTeamScores(racers) : undefined,
           });
         }
 
@@ -929,6 +1277,9 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         document.removeEventListener('visibilitychange', handleVisibility);
         audioEngine.dispose();
         weatherRig.dispose();
+        livingWorld.dispose();
+        trafficRigs.forEach((rig) => rig.dispose());
+        freestyleTrafficRef.current = null;
         carRigs.forEach((c) => c.dispose());
         worldRig.dispose();
         textures.dispose();

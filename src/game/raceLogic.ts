@@ -1,10 +1,13 @@
+import { getCarSpec } from './cars';
 import { clamp, getMapWorldData, type MapWorldData } from './terrain';
 import type {
   GameMode,
+  LobbyState,
   MapId,
   RacerProfile,
   RacerRuntime,
   RaceStandingSummary,
+  TeamId,
   VehicleInput,
 } from './types';
 import { createVehicleStateAt } from './vehiclePhysics';
@@ -78,7 +81,12 @@ export const RACER_PROFILES: RacerProfile[] = [
   },
 ];
 
-export function createRaceGrid(mode: GameMode, mapId: MapId): RacerRuntime[] {
+export function createRaceGrid(
+  mode: GameMode,
+  mapId: MapId,
+  lobby?: LobbyState | null,
+  localClientId?: string | null,
+): RacerRuntime[] {
   const world = getMapWorldData(mapId);
   const pts = world.roadPoints;
   const count = pts.length;
@@ -88,6 +96,85 @@ export function createRaceGrid(mode: GameMode, mapId: MapId): RacerRuntime[] {
     activeProfiles = [RACER_PROFILES[0]];
   } else if (mode === 'race1p') {
     activeProfiles = [RACER_PROFILES[0], ...RACER_PROFILES.slice(2)];
+  } else if (mode === 'online_2v2' || mode === 'online_ffa') {
+    const members = lobby?.members ?? [];
+    const built: RacerProfile[] = [];
+    if (members.length > 0) {
+      // Put local player first so index 0 is always controlled by WASD / Arrows
+      const sortedMembers = [...members].sort((a, b) => {
+        if (a.clientId === localClientId) return -1;
+        if (b.clientId === localClientId) return 1;
+        return 0;
+      });
+      sortedMembers.forEach((m, idx) => {
+        const isLocal = m.clientId === localClientId || (!localClientId && idx === 0);
+        const spec = getCarSpec(m.carId);
+        const teamColor =
+          mode === 'online_2v2'
+            ? m.team === 'red'
+              ? 0xe11d48
+              : 0x0284c7
+            : spec.paintHex;
+        built.push({
+          id: m.clientId,
+          name: m.name,
+          numberLabel: String(idx + 1).padStart(2, '0'),
+          paintHex: teamColor,
+          stripeHex: spec.stripeHex,
+          isHuman: isLocal,
+          isRemote: !isLocal,
+          team: m.team,
+          carId: m.carId,
+          playerIndex: isLocal ? 0 : null,
+          aiSkill: 1.0,
+          aiLaneOffset: 0,
+        });
+      });
+    } else {
+      built.push({
+        ...RACER_PROFILES[0],
+        team: mode === 'online_2v2' ? 'red' : 'ffa',
+        paintHex: mode === 'online_2v2' ? 0xe11d48 : RACER_PROFILES[0].paintHex,
+      });
+    }
+
+    // Backfill remaining 2v2 (2 Red vs 2 Blue) or FFA (up to 6 cars) with AI bots if enabled
+    const fillBots = lobby ? lobby.fillWithBots : true;
+    if (fillBots) {
+      if (mode === 'online_2v2') {
+        let redCount = built.filter((p) => p.team === 'red').length;
+        let blueCount = built.filter((p) => p.team === 'blue').length;
+        const botNames = ['Red Wingman', 'Crimson Drift', 'Cobalt Ace', 'Blue Striker'];
+        let bIdx = 0;
+        while (redCount < 2 || blueCount < 2) {
+          const team: TeamId = redCount < 2 ? 'red' : 'blue';
+          if (team === 'red') redCount++;
+          else blueCount++;
+          built.push({
+            id: `bot-2v2-${bIdx}`,
+            name: `${botNames[bIdx % botNames.length]} (AI)`,
+            numberLabel: String(10 + bIdx),
+            paintHex: team === 'red' ? 0xf43f5e : 0x38bdf8,
+            stripeHex: 0xf8fafc,
+            isHuman: false,
+            isRemote: false,
+            team,
+            playerIndex: null,
+            aiSkill: 0.92 - bIdx * 0.03,
+            aiLaneOffset: (bIdx % 2 === 0 ? -1 : 1) * 2.8,
+          });
+          bIdx++;
+        }
+      } else {
+        const ffaBots = RACER_PROFILES.slice(2);
+        let bi = 0;
+        while (built.length < 6 && bi < ffaBots.length) {
+          built.push({ ...ffaBots[bi], team: 'ffa', isRemote: false });
+          bi++;
+        }
+      }
+    }
+    activeProfiles = built;
   } else {
     activeProfiles = [...RACER_PROFILES];
   }
@@ -113,10 +200,8 @@ export function createRaceGrid(mode: GameMode, mapId: MapId): RacerRuntime[] {
       continue;
     }
 
-    // Staggered 2-wide starting grid behind the Finish Line (pts[0])
     const row = Math.floor(i / 2);
     const col = i % 2 === 0 ? -1 : 1;
-    // Step backward along spline from start line
     const backIdx = (count - 1 - row * 2 + count) % count;
     const prevIdx = (backIdx - 1 + count) % count;
     const nextIdx = (backIdx + 1) % count;
@@ -154,6 +239,18 @@ export function createRaceGrid(mode: GameMode, mapId: MapId): RacerRuntime[] {
   return racers;
 }
 
+export function computeTeamScores(racers: RacerRuntime[]): { red: number; blue: number } {
+  const pointsByPlace = [10, 6, 4, 2, 1, 0, 0, 0];
+  let red = 0;
+  let blue = 0;
+  for (const r of racers) {
+    const pts = pointsByPlace[Math.max(0, r.place - 1)] ?? 0;
+    if (r.profile.team === 'red') red += pts;
+    else if (r.profile.team === 'blue') blue += pts;
+  }
+  return { red, blue };
+}
+
 export function computeAiVehicleInput(
   racer: RacerRuntime,
   allRacers: RacerRuntime[],
@@ -164,7 +261,6 @@ export function computeAiVehicleInput(
   const pts = world.roadPoints;
   const n = pts.length;
 
-  // Find closest spline point to AI car
   let closestIdx = 0;
   let bestDistSq = Infinity;
   for (let i = 0; i < n; i++) {
@@ -177,7 +273,6 @@ export function computeAiVehicleInput(
     }
   }
 
-  // Dynamic lookahead based on speed
   const lookSteps = Math.max(3, Math.min(8, Math.round(3 + Math.abs(v.speed) * 0.1)));
   const targetIdx = (closestIdx + lookSteps) % n;
   const nextIdx = (targetIdx + 1) % n;
@@ -187,7 +282,6 @@ export function computeAiVehicleInput(
   const nPt = pts[nextIdx];
   const fPt = pts[farIdx];
 
-  // Road tangent & lateral racing offset
   let tx = nPt.x - tPt.x;
   let tz = nPt.z - tPt.z;
   const tLen = Math.hypot(tx, tz) || 1;
@@ -196,7 +290,6 @@ export function computeAiVehicleInput(
   const rightX = -tz;
   const rightZ = tx;
 
-  // Gentle car avoidance offset if another car is directly ahead
   let avoidShift = 0;
   const fwdX = Math.sin(v.yaw);
   const fwdZ = Math.cos(v.yaw);
@@ -227,10 +320,8 @@ export function computeAiVehicleInput(
   while (angleErr > Math.PI) angleErr -= Math.PI * 2;
   while (angleErr < -Math.PI) angleErr += Math.PI * 2;
 
-  // Vehicle physics steer: +1 is left (increases yaw), -1 is right (decreases yaw)
   out.steer = clamp(angleErr * 2.1, -1, 1);
 
-  // Corner curvature check for realistic braking
   const farYaw = Math.atan2(fPt.x - tPt.x, fPt.z - tPt.z);
   let curveAngle = farYaw - targetYaw;
   while (curveAngle > Math.PI) curveAngle -= Math.PI * 2;
@@ -279,13 +370,12 @@ export function stepRaceProgress(
 
   for (let i = 0; i < racers.length; i++) {
     const r = racers[i];
-    if (r.finished) continue;
+    if (r.finished || r.profile.isRemote) continue;
 
     const targetCp = cps[r.nextCheckpoint];
     const dist = Math.hypot(r.vehicle.x - targetCp.x, r.vehicle.z - targetCp.z);
     if (dist <= triggerRadius) {
       if (r.nextCheckpoint === 0) {
-        // Crossed Start/Finish Line after completing all checkpoints
         const lapTime = raceElapsed - r.lapStartTime;
         if (lapTime > 2 && (r.bestLapTime === null || lapTime < r.bestLapTime)) {
           r.bestLapTime = lapTime;
@@ -306,7 +396,6 @@ export function stepRaceProgress(
     }
 
     if (!r.finished) {
-      // Completed checkpoints in current lap (0..cpCount-1)
       const completedInLap =
         r.nextCheckpoint === 0 ? cpCount - 1 : r.nextCheckpoint - 1;
       const nextCpObj = cps[r.nextCheckpoint];
@@ -316,7 +405,6 @@ export function stepRaceProgress(
     }
   }
 
-  // Sort standings (finished fastest first, otherwise highest progressScore)
   const sorted = [...racers].sort((a, b) => {
     if (a.finished && b.finished) {
       return (a.finishTime ?? 9999) - (b.finishTime ?? 9999);
@@ -340,6 +428,7 @@ export function buildRaceStandings(racers: RacerRuntime[]): RaceStandingSummary[
       numberLabel: r.profile.numberLabel,
       paintHex: r.profile.paintHex,
       isHuman: r.profile.isHuman,
+      team: r.profile.team,
       place: r.place,
       lap: r.lap,
       finished: r.finished,

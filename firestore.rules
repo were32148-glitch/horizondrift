@@ -1,0 +1,329 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidLobbyCode(code) {
+      return code is string && code.size() == 6 && code.matches('^[A-Z0-9]{6}$');
+    }
+
+    function isValidCarId(carId) {
+      return carId is string && carId.size() <= 16 && carId in ['apex', 'baja', 'viper', 'phantom', 'titan'];
+    }
+
+    function isValidMapId(mapId) {
+      return mapId is string && mapId.size() <= 16 && mapId in ['valley', 'canyon', 'alpine', 'coast'];
+    }
+
+    function isValidWeather(preset) {
+      return preset is string && preset.size() <= 16 && preset in ['clear', 'overcast', 'rain', 'blizzard', 'night', 'auto'];
+    }
+
+    function isValidUserProfile(data, uid) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'coins',
+          'ownedCars',
+          'equippedP1',
+          'equippedP2',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'coins',
+          'ownedCars',
+          'equippedP1',
+          'equippedP2',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == uid
+        && data.uid == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 40
+        && data.coins is number
+        && data.coins >= 0
+        && data.coins <= 10000000
+        && data.ownedCars is list
+        && data.ownedCars.size() >= 1
+        && data.ownedCars.size() <= 5
+        && isValidCarId(data.ownedCars[0])
+        && data.ownedCars.hasOnly(['apex', 'baja', 'viper', 'phantom', 'titan'])
+        && isValidCarId(data.equippedP1)
+        && isValidCarId(data.equippedP2)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLobby(data, lobbyId) {
+      return data.keys().hasAll([
+          'code',
+          'hostUid',
+          'hostName',
+          'mode',
+          'mapId',
+          'weatherPreset',
+          'status',
+          'maxPlayers',
+          'isPublic',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'code',
+          'hostUid',
+          'hostName',
+          'mode',
+          'mapId',
+          'weatherPreset',
+          'status',
+          'winnerTeam',
+          'maxPlayers',
+          'isPublic',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidLobbyCode(data.code)
+        && data.code == lobbyId
+        && isValidId(data.hostUid)
+        && data.hostName is string
+        && data.hostName.size() >= 1
+        && data.hostName.size() <= 40
+        && data.mode is string
+        && data.mode.size() <= 16
+        && data.mode in ['online_2v2', 'online_ffa']
+        && isValidMapId(data.mapId)
+        && isValidWeather(data.weatherPreset)
+        && data.status is string
+        && data.status.size() <= 16
+        && data.status in ['waiting', 'racing', 'finished']
+        && (!('winnerTeam' in data) || (data.winnerTeam is string && data.winnerTeam.size() <= 32))
+        && data.maxPlayers is number
+        && data.maxPlayers >= 2
+        && data.maxPlayers <= 8
+        && data.isPublic is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLobbyMember(data, lobbyId, uid) {
+      return data.keys().hasAll([
+          'uid',
+          'lobbyCode',
+          'displayName',
+          'carId',
+          'team',
+          'ready',
+          'joinedAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'lobbyCode',
+          'displayName',
+          'carId',
+          'team',
+          'ready',
+          'joinedAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == uid
+        && data.uid == request.auth.uid
+        && isValidLobbyCode(data.lobbyCode)
+        && data.lobbyCode == lobbyId
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 40
+        && isValidCarId(data.carId)
+        && data.team is string
+        && data.team.size() <= 8
+        && data.team in ['red', 'blue', 'ffa']
+        && data.ready is bool
+        && data.joinedAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'mapId',
+          'mode',
+          'carId',
+          'bestTimeSec',
+          'driftScore',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'mapId',
+          'mode',
+          'carId',
+          'bestTimeSec',
+          'driftScore',
+          'createdAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 40
+        && isValidMapId(data.mapId)
+        && data.mode is string
+        && data.mode.size() <= 16
+        && data.mode in ['race1p', 'race2p', 'online_2v2', 'online_ffa']
+        && isValidCarId(data.carId)
+        && data.bestTimeSec is number
+        && data.bestTimeSec >= 5
+        && data.bestTimeSec <= 7200
+        && data.driftScore is number
+        && data.driftScore >= 0
+        && data.driftScore <= 10000000
+        && data.createdAt is timestamp;
+    }
+
+    // Owner-only user garage profiles (PII / private inventory isolated per user)
+    match /users/{uid} {
+      allow get: if isSignedIn() && isValidId(uid) && request.auth.uid == uid;
+      allow create: if isVerifiedUser()
+        && isValidId(uid)
+        && request.auth.uid == uid
+        && isValidUserProfile(incoming(), uid)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(uid)
+        && request.auth.uid == uid
+        && isValidUserProfile(incoming(), uid)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'coins',
+          'ownedCars',
+          'equippedP1',
+          'equippedP2',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // Cloud Multiplayer Lobbies indexed by 6-char Join Code
+    match /lobbies/{lobbyId} {
+      allow get: if isSignedIn() && isValidLobbyCode(lobbyId);
+      allow list: if isSignedIn() && (existing().isPublic == true || existing().hostUid == request.auth.uid);
+      allow create: if isVerifiedUser()
+        && isValidLobbyCode(lobbyId)
+        && isValidLobby(incoming(), lobbyId)
+        && incoming().hostUid == request.auth.uid
+        && incoming().status == 'waiting'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidLobbyCode(lobbyId)
+        && isValidLobby(incoming(), lobbyId)
+        && existing().hostUid == request.auth.uid
+        && existing().status != 'finished'
+        && incoming().hostUid == existing().hostUid
+        && incoming().code == existing().code
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update Room Settings while waiting
+          (existing().status == 'waiting'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['mapId', 'weatherPreset', 'mode', 'isPublic', 'updatedAt'])) ||
+          // Action: Start Race
+          (existing().status == 'waiting'
+            && incoming().status == 'racing'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+          // Action: Finish Race (Terminal State Transition)
+          (existing().status == 'racing'
+            && incoming().status == 'finished'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'winnerTeam', 'updatedAt']))
+        );
+      allow delete: if isVerifiedUser()
+        && isValidLobbyCode(lobbyId)
+        && existing().hostUid == request.auth.uid;
+
+      // Lobby Members subcollection (Master Gate checks parent Lobby exists)
+      match /members/{uid} {
+        allow get: if isSignedIn()
+          && isValidLobbyCode(lobbyId)
+          && isValidId(uid)
+          && exists(/databases/$(database)/documents/lobbies/$(lobbyId));
+        allow list: if isSignedIn() && existing().lobbyCode == lobbyId;
+        allow create: if isVerifiedUser()
+          && isValidLobbyCode(lobbyId)
+          && isValidId(uid)
+          && request.auth.uid == uid
+          && isValidLobbyMember(incoming(), lobbyId, uid)
+          && incoming().joinedAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/lobbies/$(lobbyId))
+          && get(/databases/$(database)/documents/lobbies/$(lobbyId)).data.status == 'waiting';
+        allow update: if isVerifiedUser()
+          && isValidLobbyCode(lobbyId)
+          && isValidId(uid)
+          && request.auth.uid == uid
+          && isValidLobbyMember(incoming(), lobbyId, uid)
+          && incoming().uid == existing().uid
+          && incoming().lobbyCode == existing().lobbyCode
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/lobbies/$(lobbyId))
+          && get(/databases/$(database)/documents/lobbies/$(lobbyId)).data.status != 'finished'
+          && incoming().diff(existing()).affectedKeys().hasOnly(['carId', 'team', 'ready', 'displayName', 'updatedAt']);
+        allow delete: if isVerifiedUser()
+          && isValidLobbyCode(lobbyId)
+          && isValidId(uid)
+          && (
+            request.auth.uid == uid ||
+            (exists(/databases/$(database)/documents/lobbies/$(lobbyId))
+              && get(/databases/$(database)/documents/lobbies/$(lobbyId)).data.hostUid == request.auth.uid)
+          );
+      }
+    }
+
+    // Leaderboards
+    match /leaderboards/{entryId} {
+      allow get: if isSignedIn() && isValidId(entryId);
+      allow list: if isSignedIn() && existing().bestTimeSec > 0;
+      allow create: if isVerifiedUser()
+        && isValidId(entryId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

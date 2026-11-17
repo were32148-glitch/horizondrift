@@ -1,4 +1,4 @@
-import type { CarId, CarSpec, GarageSaveData } from './types';
+import type { CarId, CharacterId, CarSpec, GarageSaveData, WeaponId } from './types';
 
 export const GARAGE_STORAGE_KEY = 'horizon_drift_garage_v1';
 
@@ -88,10 +88,66 @@ export const CAR_ROSTER: CarSpec[] = [
     boostMul: 1.38,
     stats: { speed: 99, accel: 98, handling: 98, offroad: 90 },
   },
+  {
+    id: 'police_cruiser',
+    name: 'LSPD Interceptor',
+    category: 'Law Enforcement',
+    description: 'Heavy pursuit cruiser equipped with emergency lights and reinforced push bumper.',
+    price: 300,
+    paintHex: 0x1d4ed8,
+    stripeHex: 0xf8fafc,
+    rimHex: 0x94a3b8,
+    bodyStyle: 'track',
+    speedMul: 1.08,
+    accelMul: 1.1,
+    gripMul: 1.12,
+    offroadMul: 1.0,
+    boostMul: 1.15,
+    stats: { speed: 85, accel: 84, handling: 88, offroad: 75 },
+  },
+];
+
+export interface CharacterSpec {
+  id: CharacterId;
+  name: string;
+  description: string;
+  price: number;
+  armorBonus: number;
+}
+
+export const CHARACTER_ROSTER: CharacterSpec[] = [
+  { id: 'default', name: 'Civilian Drifter', description: 'Standard driver outfit.', price: 0, armorBonus: 0 },
+  { id: 'detective', name: 'LSPD Detective', description: 'Undercover tactical gear with improved pistol handling.', price: 200, armorBonus: 25 },
+  { id: 'street_boss', name: 'Los Santos Kingpin', description: 'Elite custom armor and intimidation bonus.', price: 450, armorBonus: 50 },
+  { id: 'special_ops', name: 'SWAT Special Ops', description: 'Heavy ballistic body armor and maximum protection.', price: 800, armorBonus: 100 },
+];
+
+export interface WeaponSpec {
+  id: WeaponId;
+  name: string;
+  damage: number;
+  fireRate: number;
+  price: number;
+}
+
+export const WEAPON_ROSTER: WeaponSpec[] = [
+  { id: 'fists', name: 'Combat Fists', damage: 15, fireRate: 2.0, price: 0 },
+  { id: 'pistol', name: '9mm Pistol', damage: 35, fireRate: 4.0, price: 100 },
+  { id: 'shotgun', name: 'Pump Shotgun', damage: 85, fireRate: 1.2, price: 250 },
+  { id: 'assault_rifle', name: 'Carbine Rifle', damage: 45, fireRate: 10.0, price: 500 },
+  { id: 'minigun', name: 'Heavy Minigun', damage: 110, fireRate: 25.0, price: 1200 },
 ];
 
 export function getCarSpec(id: CarId): CarSpec {
   return CAR_ROSTER.find((c) => c.id === id) ?? CAR_ROSTER[0];
+}
+
+export function getCharacterSpec(id: CharacterId): CharacterSpec {
+  return CHARACTER_ROSTER.find((c) => c.id === id) ?? CHARACTER_ROSTER[0];
+}
+
+export function getWeaponSpec(id: WeaponId): WeaponSpec {
+  return WEAPON_ROSTER.find((w) => w.id === id) ?? WEAPON_ROSTER[0];
 }
 
 export function createDefaultGarageSave(): GarageSaveData {
@@ -100,6 +156,10 @@ export function createDefaultGarageSave(): GarageSaveData {
     ownedCars: ['apex'],
     equippedP1: 'apex',
     equippedP2: 'apex',
+    equippedCharacter: 'default',
+    unlockedCharacters: ['default'],
+    equippedWeapon: 'fists',
+    unlockedWeapons: ['fists'],
   };
 }
 
@@ -119,11 +179,45 @@ export function loadGarageSave(): GarageSaveData {
       parsed.equippedP1 && owned.includes(parsed.equippedP1) ? parsed.equippedP1 : 'apex';
     const equippedP2 =
       parsed.equippedP2 && owned.includes(parsed.equippedP2) ? parsed.equippedP2 : 'apex';
+
+    const validChars = new Set<CharacterId>(CHARACTER_ROSTER.map((c) => c.id));
+    const unlockedChars = (
+      Array.isArray(parsed.unlockedCharacters)
+        ? parsed.unlockedCharacters.filter((id): id is CharacterId => validChars.has(id))
+        : ['default']
+    ) as CharacterId[];
+    if (!unlockedChars.includes('default')) unlockedChars.unshift('default');
+    const equippedCharacter =
+      parsed.equippedCharacter && unlockedChars.includes(parsed.equippedCharacter)
+        ? parsed.equippedCharacter
+        : 'default';
+
+    const validWeapons = new Set<WeaponId>(WEAPON_ROSTER.map((w) => w.id));
+    const unlockedWeapons = (
+      Array.isArray(parsed.unlockedWeapons)
+        ? parsed.unlockedWeapons.filter((id): id is WeaponId => validWeapons.has(id))
+        : ['fists']
+    ) as WeaponId[];
+    if (!unlockedWeapons.includes('fists')) unlockedWeapons.unshift('fists');
+    const equippedWeapon =
+      parsed.equippedWeapon && unlockedWeapons.includes(parsed.equippedWeapon)
+        ? parsed.equippedWeapon
+        : 'fists';
+
     const coins =
       typeof parsed.coins === 'number' && Number.isFinite(parsed.coins) && parsed.coins >= 0
         ? Math.floor(parsed.coins)
         : def.coins;
-    return { coins, ownedCars: owned, equippedP1, equippedP2 };
+    return {
+      coins,
+      ownedCars: owned,
+      equippedP1,
+      equippedP2,
+      equippedCharacter,
+      unlockedCharacters: unlockedChars,
+      equippedWeapon,
+      unlockedWeapons,
+    };
   } catch {
     return def;
   }
@@ -156,12 +250,63 @@ export function purchaseCar(
     return { next: save, purchased: false };
   }
   const next: GarageSaveData = {
+    ...save,
     coins: save.coins - spec.price,
     ownedCars: [...save.ownedCars, carId],
     equippedP1: equipForPlayer === 1 ? carId : save.equippedP1,
     equippedP2: equipForPlayer === 2 ? carId : save.equippedP2,
   };
   return { next, purchased: true };
+}
+
+export function purchaseCharacter(
+  save: GarageSaveData,
+  charId: CharacterId,
+): { next: GarageSaveData; purchased: boolean } {
+  const spec = getCharacterSpec(charId);
+  if (save.unlockedCharacters.includes(charId)) {
+    return {
+      next: { ...save, equippedCharacter: charId },
+      purchased: false,
+    };
+  }
+  if (save.coins < spec.price) {
+    return { next: save, purchased: false };
+  }
+  return {
+    next: {
+      ...save,
+      coins: save.coins - spec.price,
+      unlockedCharacters: [...save.unlockedCharacters, charId],
+      equippedCharacter: charId,
+    },
+    purchased: true,
+  };
+}
+
+export function purchaseWeapon(
+  save: GarageSaveData,
+  weaponId: WeaponId,
+): { next: GarageSaveData; purchased: boolean } {
+  const spec = getWeaponSpec(weaponId);
+  if (save.unlockedWeapons.includes(weaponId)) {
+    return {
+      next: { ...save, equippedWeapon: weaponId },
+      purchased: false,
+    };
+  }
+  if (save.coins < spec.price) {
+    return { next: save, purchased: false };
+  }
+  return {
+    next: {
+      ...save,
+      coins: save.coins - spec.price,
+      unlockedWeapons: [...save.unlockedWeapons, weaponId],
+      equippedWeapon: weaponId,
+    },
+    purchased: true,
+  };
 }
 
 export function awardCoins(save: GarageSaveData, delta: number): GarageSaveData {

@@ -6,12 +6,15 @@ import {
   Coins,
   Compass,
   Flag,
+  Globe,
   Lightbulb,
   MapPin,
   Moon,
+  Navigation,
   Pause,
   Play,
   RotateCcw,
+  Shield,
   Snowflake,
   Sun,
   Trophy,
@@ -21,18 +24,21 @@ import {
   Wind,
 } from 'lucide-react';
 import { CAR_PAINT_OPTIONS } from '../game/carModel';
-import { MAP_LIST } from '../game/maps';
+import { FAST_TRAVEL_ZONES, MAP_LIST } from '../game/maps';
 import type {
   ActiveWeatherCondition,
   CameraMode,
+  FastTravelZone,
   GameMode,
   GamePhase,
   HudSnapshot,
+  LobbyState,
   MapId,
   PlayerHudInfo,
   RaceStandingSummary,
   SurfaceType,
   WeatherPreset,
+  WeaponId,
 } from '../game/types';
 import { WEATHER_LABELS } from '../game/weather';
 import { Minimap } from './Minimap';
@@ -50,14 +56,23 @@ interface GameHudProps {
   equippedCarP2Name: string;
   beaconToast: string | null;
   coinToast: string | null;
+  reactionToast: string | null;
   lastRaceBonusCoins: number;
+  activeLobby: LobbyState | null;
+  isOnFoot: boolean;
+  onToggleOnFoot: () => void;
+  characterHealth: number;
+  wantedLevel: number;
+  equippedWeapon: WeaponId;
   onSelectMode: (mode: GameMode) => void;
   onSelectMap: (mapId: MapId) => void;
   onStart: () => void;
   onOpenGarage: () => void;
+  onOpenLobby: () => void;
   onPauseToggle: () => void;
   onReturnTitle: () => void;
   onResetCar: () => void;
+  onTeleportZone: (zone: FastTravelZone) => void;
   onRaceAgain: () => void;
   onSelectWeather: (preset: WeatherPreset) => void;
   onCycleCamera: () => void;
@@ -68,12 +83,14 @@ interface GameHudProps {
 
 const SURFACE_LABELS: Record<SurfaceType, { label: string; accent: string }> = {
   asphalt: { label: 'ASPHALT', accent: '#e2e8f0' },
+  concrete: { label: 'CITY CONCRETE', accent: '#cbd5e1' },
+  wood: { label: 'PIER TIMBER', accent: '#f59e0b' },
   dirt: { label: 'GRAVEL TRAIL', accent: '#d97706' },
   grass: { label: 'GRASSLANDS', accent: '#4ade80' },
   forest: { label: 'FOREST FLOOR', accent: '#22c55e' },
   rock: { label: 'CANYON ROCK', accent: '#f97316' },
   snow: { label: 'ALPINE SNOW', accent: '#bae6fd' },
-  sand: { label: 'SHORE SAND', accent: '#fde047' },
+  sand: { label: 'BEACH SAND', accent: '#fde047' },
   water: { label: 'WATER', accent: '#38bdf8' },
 };
 
@@ -123,7 +140,7 @@ function TachometerCluster({
   const sweepFrac = 0.62;
   const maxDash = arcCircum * sweepFrac;
   const activeDash = maxDash * rpmNorm;
-  const surfInfo = SURFACE_LABELS[player.surface];
+  const surfInfo = SURFACE_LABELS[player.surface] ?? SURFACE_LABELS.asphalt;
   const gearText = player.gear === -1 ? 'R' : player.gear === 0 ? 'N' : String(player.gear);
 
   return (
@@ -139,6 +156,11 @@ function TachometerCluster({
         >
           {surfInfo.label}
         </div>
+        {player.surface !== 'asphalt' && player.surface !== 'concrete' && (
+          <div className="bg-amber-500/20 px-1.5 py-0.5 text-[8px] font-black tracking-wider text-amber-300 uppercase">
+            OFFROAD DRAG
+          </div>
+        )}
         <div className="flex items-center gap-1.5">
           <span className="text-[9px] font-bold tracking-wider text-slate-400">NITRO</span>
           <div className="h-2 w-16 overflow-hidden bg-slate-800">
@@ -216,14 +238,23 @@ export function GameHud({
   equippedCarP2Name,
   beaconToast,
   coinToast,
+  reactionToast,
   lastRaceBonusCoins,
+  activeLobby,
+  isOnFoot,
+  onToggleOnFoot,
+  characterHealth,
+  wantedLevel,
+  equippedWeapon,
   onSelectMode,
   onSelectMap,
   onStart,
   onOpenGarage,
+  onOpenLobby,
   onPauseToggle,
   onReturnTitle,
   onResetCar,
+  onTeleportZone,
   onRaceAgain,
   onSelectWeather,
   onCycleCamera,
@@ -234,20 +265,28 @@ export function GameHud({
   if (phase === 'title') {
     const startLabel =
       mode === 'race2p'
-        ? 'Start 2P Split-Screen Race'
+        ? 'Start 2P Split-Screen'
         : mode === 'race1p'
-          ? 'Start Grand Prix Race'
-          : 'Start Freestyle Drive';
+          ? 'Start 1P Grand Prix'
+          : mode === 'online_2v2'
+            ? activeLobby
+              ? 'Enter Online 2v2'
+              : 'Open 2v2 Lobby'
+            : mode === 'online_ffa'
+              ? activeLobby
+                ? 'Enter Online FFA'
+                : 'Open FFA Lobby'
+              : 'Explore Wildlands & Los Santos';
 
     return (
-      <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-6 sm:p-10">
-        <div className="flex max-w-xl flex-col gap-5 pt-2">
+      <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-5 sm:p-8">
+        <div className="flex max-w-2xl flex-col gap-4 pt-1">
           {/* Brand Title SVG */}
           <svg
-            viewBox="0 0 540 148"
-            className="w-full max-w-[460px] drop-shadow-[0_6px_20px_rgba(0,0,0,0.85)]"
+            viewBox="0 0 640 146"
+            className="w-full max-w-[500px] drop-shadow-[0_6px_20px_rgba(0,0,0,0.85)]"
             role="img"
-            aria-label="Horizon Drift: Wildlands"
+            aria-label="Horizon Drift: Wildlands & Los Santos"
           >
             <defs>
               <linearGradient id="hd-title-grad" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -260,18 +299,18 @@ export function GameHud({
             <polygon points="24,16 34,16 26,44 16,44" fill="#38bdf8" />
             <text
               x="44"
-              y="41"
+              y="40"
               fill="#f8fafc"
-              fontSize="18"
+              fontSize="16"
               fontWeight="800"
-              letterSpacing="6"
+              letterSpacing="4"
               fontFamily="system-ui, -apple-system, sans-serif"
             >
-              2P SPLIT-SCREEN · OPEN WORLD GP
+              30X OPEN WORLD · ONLINE 2V2 · LOS SANTOS
             </text>
             <text
               x="2"
-              y="102"
+              y="100"
               fill="url(#hd-title-grad)"
               stroke="#090d16"
               strokeWidth="6"
@@ -284,35 +323,37 @@ export function GameHud({
             >
               HORIZON DRIFT
             </text>
-            <line x1="4" y1="115" x2="310" y2="115" stroke="#f59e0b" strokeWidth="3.5" />
+            <line x1="4" y1="113" x2="355" y2="113" stroke="#f59e0b" strokeWidth="3.5" />
             <text
               x="4"
-              y="141"
+              y="138"
               fill="#cbd5e1"
               stroke="#090d16"
               strokeWidth="4"
               paintOrder="stroke fill"
-              fontSize="20"
+              fontSize="18"
               fontWeight="700"
-              letterSpacing="10"
+              letterSpacing="7"
               fontFamily="system-ui, -apple-system, sans-serif"
             >
-              WILDLANDS GP
+              WILDLANDS &amp; LOS SANTOS
             </text>
           </svg>
 
           {/* Compact Mode Selector */}
           <div className="pointer-events-auto flex flex-col gap-3">
             <div>
-              <div className="mb-1.5 text-[11px] font-bold tracking-widest text-amber-400 uppercase [text-shadow:0_2px_6px_rgba(0,0,0,0.9)]">
+              <div className="mb-1.5 inline-block bg-slate-950/90 px-2 py-0.5 text-[11px] font-bold tracking-widest text-amber-400 uppercase">
                 Select Race Mode
               </div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                 {(
                   [
-                    { id: 'race2p', label: '2P Split-Screen', sub: 'WASD vs Arrows + AI', icon: <Users size={15} /> },
-                    { id: 'race1p', label: '1P vs AI Bots', sub: '3-Lap Grand Prix', icon: <Flag size={15} /> },
-                    { id: 'freestyle', label: 'Freestyle', sub: 'Open World Explore', icon: <Compass size={15} /> },
+                    { id: 'race2p', label: '2P Split', sub: 'WASD vs Arrows', icon: <Users size={14} /> },
+                    { id: 'race1p', label: '1P vs AI', sub: 'Grand Prix', icon: <Flag size={14} /> },
+                    { id: 'freestyle', label: 'Freestyle', sub: 'Explore LS', icon: <Compass size={14} /> },
+                    { id: 'online_2v2', label: 'Online 2v2', sub: 'Red vs Blue', icon: <Shield size={14} /> },
+                    { id: 'online_ffa', label: 'Online FFA', sub: 'Lobby Code', icon: <Globe size={14} /> },
                   ] as const
                 ).map((m) => {
                   const active = mode === m.id;
@@ -322,13 +363,13 @@ export function GameHud({
                       type="button"
                       data-testid={`mode-${m.id}`}
                       onClick={() => onSelectMode(m.id)}
-                      className={`flex cursor-pointer flex-col items-start border-2 px-3 py-2 text-left transition-colors ${
+                      className={`flex cursor-pointer flex-col items-start border-2 px-2.5 py-2 text-left transition-colors ${
                         active
                           ? 'border-amber-400 bg-slate-950/95 text-white shadow-lg'
-                          : 'border-slate-700/80 bg-slate-950/80 text-slate-300 hover:border-slate-500'
+                          : 'border-slate-700/80 bg-slate-950/82 text-slate-300 hover:border-slate-500'
                       }`}
                     >
-                      <div className="flex items-center gap-1.5 text-xs font-black tracking-wide uppercase">
+                      <div className="flex items-center gap-1.5 text-[11px] font-black tracking-wide uppercase">
                         <span className={active ? 'text-amber-400' : 'text-slate-400'}>{m.icon}</span>
                         <span>{m.label}</span>
                       </div>
@@ -341,8 +382,8 @@ export function GameHud({
 
             {/* 4-Map Selector */}
             <div>
-              <div className="mb-1.5 text-[11px] font-bold tracking-widest text-amber-400 uppercase [text-shadow:0_2px_6px_rgba(0,0,0,0.9)]">
-                Select Circuit & World Map (5x Scale)
+              <div className="mb-1.5 inline-block bg-slate-950/90 px-2 py-0.5 text-[11px] font-bold tracking-widest text-amber-400 uppercase">
+                Select Region + Northbound Los Santos Expansion (30x Scale)
               </div>
               <div className="grid grid-cols-2 gap-2">
                 {MAP_LIST.map((m) => {
@@ -356,7 +397,7 @@ export function GameHud({
                       className={`flex cursor-pointer items-center gap-2.5 border-2 px-3 py-2 text-left transition-colors ${
                         active
                           ? 'border-amber-400 bg-slate-950/95 text-white shadow-lg'
-                          : 'border-slate-700/80 bg-slate-950/80 text-slate-300 hover:border-slate-500'
+                          : 'border-slate-700/80 bg-slate-950/82 text-slate-300 hover:border-slate-500'
                       }`}
                     >
                       <span
@@ -375,15 +416,25 @@ export function GameHud({
               </div>
             </div>
 
-            <div className="mt-1 flex flex-wrap items-center gap-3">
+            <div className="mt-1 flex flex-wrap items-center gap-2.5">
               <button
                 type="button"
                 data-start="true"
                 onClick={onStart}
-                className="flex cursor-pointer items-center gap-2.5 border-2 border-amber-400 bg-amber-500 px-6 py-3 text-sm font-black tracking-wider text-slate-950 uppercase shadow-[0_8px_28px_rgba(245,158,11,0.45)] transition-transform duration-150 hover:scale-[1.03] hover:bg-amber-400 active:scale-[0.98]"
+                className="flex cursor-pointer items-center gap-2 border-2 border-amber-400 bg-amber-500 px-5 py-3 text-xs font-black tracking-wider text-slate-950 uppercase shadow-[0_8px_28px_rgba(245,158,11,0.45)] transition-transform duration-150 hover:scale-[1.03] hover:bg-amber-400 active:scale-[0.98] sm:text-sm"
               >
-                <Play size={17} fill="currentColor" />
+                <Play size={16} fill="currentColor" />
                 {startLabel}
+              </button>
+
+              <button
+                type="button"
+                data-testid="open-lobby-btn"
+                onClick={onOpenLobby}
+                className="flex cursor-pointer items-center gap-2 border-2 border-sky-400/75 bg-slate-950/92 px-4 py-3 text-xs font-black tracking-wider text-sky-300 uppercase shadow-lg transition-colors hover:border-sky-300 hover:bg-slate-900"
+              >
+                <Globe size={15} />
+                <span>{activeLobby ? `Lobby #${activeLobby.code}` : 'Online Lobby'}</span>
               </button>
 
               <button
@@ -392,8 +443,8 @@ export function GameHud({
                 onClick={onOpenGarage}
                 className="flex cursor-pointer items-center gap-2 border-2 border-slate-600 bg-slate-950/92 px-4 py-3 text-xs font-black tracking-wider text-white uppercase shadow-lg transition-colors hover:border-amber-400 hover:text-amber-300"
               >
-                <CarFront size={16} className="text-amber-400" />
-                <span>Garage & Shop</span>
+                <CarFront size={15} className="text-amber-400" />
+                <span>Garage</span>
                 <span
                   data-testid="title-coin-balance"
                   className="ml-1 flex items-center gap-1 border border-amber-400/50 bg-amber-500/15 px-2 py-0.5 font-mono text-[11px] font-black text-amber-300 tabular-nums"
@@ -404,12 +455,21 @@ export function GameHud({
               </button>
             </div>
 
-            <div className="text-[11px] font-bold tracking-wider text-slate-300 uppercase [text-shadow:0_2px_6px_rgba(0,0,0,0.95)]">
+            <div className="inline-block w-fit bg-slate-950/90 px-2.5 py-1 text-[11px] font-bold tracking-wider text-slate-200 uppercase">
               Equipped: <span className="text-amber-300">{equippedCarP1Name}</span>
               {mode === 'race2p' && (
                 <>
                   {' '}
                   · P2: <span className="text-sky-300">{equippedCarP2Name}</span>
+                </>
+              )}
+              {activeLobby && (
+                <>
+                  {' '}
+                  · Active Lobby:{' '}
+                  <span className="font-mono text-sky-300">
+                    #{activeLobby.code} ({activeLobby.members.length} racers)
+                  </span>
                 </>
               )}
             </div>
@@ -418,7 +478,7 @@ export function GameHud({
 
         {/* Bottom Control Hint */}
         <div className="text-center text-[11px] font-bold tracking-widest text-slate-200 uppercase [text-shadow:0_2px_8px_rgba(0,0,0,0.95)]">
-          P1: WASD + Space (Brake) + L-Shift (Nitro) &nbsp;|&nbsp; P2: Arrow Keys + Enter (Brake) + R-Shift (Nitro) &nbsp;|&nbsp; C Cam · V Weather · Esc Pause
+          Drive North over Great Divide Passes to reach Los Santos · P1: WASD + Space + L-Shift · P2: Arrows + Enter · C Cam · Esc Pause
         </div>
       </div>
     );
@@ -462,17 +522,70 @@ export function GameHud({
       )}
 
       {/* HUD Overlay */}
-      <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between p-3 sm:p-4">
+      <div
+        className={`pointer-events-none fixed inset-0 z-10 flex flex-col justify-between ${
+          is2P ? 'p-2 sm:p-2.5' : 'p-3 sm:p-4'
+        }`}
+      >
+        {/* Freestyle On-Foot / Exit Car Button & Wanted Bar */}
+        {mode === 'freestyle' && phase === 'playing' && (
+          <div className="pointer-events-auto fixed bottom-6 left-1/2 z-20 -translate-x-1/2 flex items-center gap-3">
+            <button
+              type="button"
+              data-testid="toggle-onfoot-btn"
+              onClick={onToggleOnFoot}
+              className={`cursor-pointer border-2 px-6 py-3 text-sm font-black tracking-wider uppercase shadow-2xl transition-transform hover:scale-105 ${
+                isOnFoot
+                  ? 'border-emerald-400 bg-emerald-500 text-slate-950 animate-pulse'
+                  : 'border-amber-400 bg-amber-500 text-slate-950'
+              }`}
+            >
+              {isOnFoot ? 'Enter Car [E]' : 'Exit Car [E]'}
+            </button>
+            <div className="flex flex-col gap-1 border border-slate-700 bg-slate-950/92 px-3.5 py-2 shadow-xl">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">Wanted</span>
+                <span className="font-mono text-xs tracking-wider text-amber-400">
+                  {wantedLevel === 0 ? '☆☆☆☆☆' : '★'.repeat(wantedLevel) + '☆'.repeat(5 - wantedLevel)}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">HP</span>
+                <div className="h-2 w-24 overflow-hidden bg-slate-800">
+                  <div className="h-full bg-emerald-400 transition-all" style={{ width: `${characterHealth}%` }} />
+                </div>
+                <span className="font-mono text-[10px] text-slate-300">{characterHealth}</span>
+              </div>
+              <div className="text-[9px] font-mono text-sky-300 uppercase">
+                Weapon: {equippedWeapon.toUpperCase()}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Top Row */}
         <div className="flex items-start justify-between gap-3">
           {/* Top-Left: Player 1 Status */}
           <div className="flex flex-col gap-1.5">
-            <div className="flex items-center gap-3 border-l-4 border-rose-500 bg-slate-950/90 px-3 py-1.5 shadow-lg">
+            <div
+              className={`flex items-center gap-3 border-l-4 ${
+                p1?.team === 'blue' ? 'border-sky-400' : 'border-rose-500'
+              } bg-slate-950/90 px-3 py-1.5 shadow-lg`}
+            >
               <div>
                 <div className="flex items-center gap-1.5 text-[10px] font-black tracking-widest text-rose-400 uppercase">
-                  <span>{is2P ? `P1 · ${p1?.carName ?? equippedCarP1Name}` : hud.mapName}</span>
+                  <span>
+                    {is2P
+                      ? `P1 · ${p1?.carName ?? equippedCarP1Name}`
+                      : p1?.team === 'red' || p1?.team === 'blue'
+                        ? `${p1.team.toUpperCase()} SQUAD · ${p1.carName}`
+                        : hud.mapName}
+                  </span>
                 </div>
-                <div className="flex items-center gap-2 text-xs font-extrabold text-slate-100">
+                <div
+                  data-testid="hud-biome"
+                  className="flex items-center gap-2 text-xs font-extrabold text-slate-100"
+                >
                   <WeatherIcon condition={hud.weatherCondition} size={13} />
                   <span>{p1 ? p1.biome : hud.mapName}</span>
                 </div>
@@ -501,11 +614,48 @@ export function GameHud({
                 </div>
               )}
             </div>
+
+            {/* Freestyle Fast-Travel Los Santos District Bar */}
+            {hud.mode === 'freestyle' && phase === 'playing' && (
+              <div className="pointer-events-auto flex flex-wrap items-center gap-1 bg-slate-950/88 p-1 shadow-lg">
+                <span className="flex items-center gap-1 px-1.5 text-[9px] font-black tracking-widest text-amber-400 uppercase">
+                  <Navigation size={10} />
+                  Jump:
+                </span>
+                {FAST_TRAVEL_ZONES.map((z) => (
+                  <button
+                    key={z.id}
+                    type="button"
+                    tabIndex={-1}
+                    data-testid={`jump-${z.id}`}
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      onTeleportZone(z);
+                    }}
+                    className="cursor-pointer border border-slate-700/80 bg-slate-900 px-2 py-0.5 text-[10px] font-bold text-slate-200 uppercase hover:border-amber-400 hover:text-amber-300"
+                  >
+                    {z.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Center Toast / Timer & Coin Balance */}
+          {/* Center Toast / Timer, Team Scores & Coin Balance */}
           <div className="flex flex-col items-center gap-1.5">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {hud.mode === 'online_2v2' && hud.teamScores && (
+                <div className="flex items-center gap-2 border border-slate-700 bg-slate-950/92 px-3 py-1 font-mono text-xs font-black shadow">
+                  <span className="text-rose-400">RED {hud.teamScores.red}</span>
+                  <span className="text-slate-600">VS</span>
+                  <span className="text-sky-400">BLUE {hud.teamScores.blue}</span>
+                </div>
+              )}
+              {hud.lobbyCode && (
+                <div className="border border-sky-400/60 bg-slate-950/92 px-2.5 py-1 font-mono text-xs font-black tracking-widest text-sky-300 shadow">
+                  #{hud.lobbyCode}
+                </div>
+              )}
               {isRace && (
                 <div className="border border-slate-700/80 bg-slate-950/90 px-3 py-1 font-mono text-xs font-black text-slate-200 shadow tabular-nums">
                   RACE {formatTime(hud.raceElapsed)}
@@ -519,9 +669,28 @@ export function GameHud({
                 <span>{totalCoins}</span>
               </div>
             </div>
+
+            {p1?.isDrifting && (
+              <div className="border border-sky-400/80 bg-slate-950/92 px-3 py-1 font-mono text-xs font-black tracking-wider text-sky-300 uppercase shadow-2xl">
+                DRIFTING · {p1.totalDriftScore.toLocaleString()} PTS
+              </div>
+            )}
+            {p1?.airTime !== undefined && p1.airTime > 0.25 && (
+              <div className="border border-emerald-400/80 bg-slate-950/92 px-3 py-1 font-mono text-xs font-black tracking-wider text-emerald-300 uppercase shadow-2xl">
+                AIRBORNE · {p1.airTime.toFixed(1)}S
+              </div>
+            )}
             {coinToast && (
               <div className="border border-amber-400 bg-slate-950/95 px-3 py-1 font-mono text-xs font-black tracking-wider text-amber-300 uppercase shadow-2xl">
                 {coinToast}
+              </div>
+            )}
+            {reactionToast && (
+              <div
+                data-testid="reaction-toast"
+                className="border border-orange-400/80 bg-slate-950/95 px-3 py-1 text-[11px] font-black tracking-wider text-orange-300 uppercase shadow-2xl"
+              >
+                {reactionToast}
               </div>
             )}
             {beaconToast && (
@@ -645,7 +814,6 @@ export function GameHud({
         {/* Bottom Row */}
         {is2P && p1 && p2 ? (
           <div className="flex items-end justify-between gap-2">
-            {/* P1 Bottom-Left Speedometer */}
             <TachometerCluster
               player={p1}
               accentClass="border-rose-500"
@@ -653,15 +821,14 @@ export function GameHud({
               compact
             />
 
-            {/* Center Minimap + Weather Bar */}
-            <div className="flex flex-col items-center gap-1.5">
+            <div className="flex flex-col items-center gap-1">
               <div className="hidden md:block">
                 <Minimap
                   mapId={hud.mapId}
                   players={hud.players}
                   aiDots={hud.aiDots}
                   discoveredIds={hud.discoveredIds}
-                  size={112}
+                  size={92}
                 />
               </div>
               <div className="pointer-events-auto flex items-center gap-0.5 border border-slate-700/80 bg-slate-950/90 p-1 shadow-xl">
@@ -696,7 +863,6 @@ export function GameHud({
               </div>
             </div>
 
-            {/* P2 Bottom-Right Speedometer */}
             <TachometerCluster
               player={p2}
               accentClass="border-sky-400"
@@ -768,7 +934,7 @@ export function GameHud({
           aria-label="Game Paused"
           className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/80 p-4"
         >
-          <div className="w-full max-w-md border border-slate-700 bg-slate-950 p-6 shadow-2xl">
+          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto border border-slate-700 bg-slate-950 p-6 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-4">
               <div>
                 <div className="flex items-center gap-1.5 text-[11px] font-bold tracking-widest text-amber-400 uppercase">
@@ -784,6 +950,31 @@ export function GameHud({
                 <div>BEACONS {hud.beaconsFound}/{hud.totalBeacons}</div>
               </div>
             </div>
+
+            {/* Fast Travel District Jump (Freestyle) */}
+            {hud.mode === 'freestyle' && (
+              <div className="mt-4">
+                <div className="text-[11px] font-bold tracking-widest text-slate-400 uppercase">
+                  Fast Travel Districts
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
+                  {FAST_TRAVEL_ZONES.map((z) => (
+                    <button
+                      key={z.id}
+                      type="button"
+                      onClick={() => {
+                        onTeleportZone(z);
+                        onPauseToggle();
+                      }}
+                      className="cursor-pointer border border-slate-800 bg-slate-900 px-2.5 py-2 text-left hover:border-amber-400"
+                    >
+                      <div className="text-[11px] font-black text-white uppercase">{z.label}</div>
+                      <div className="text-[9px] text-slate-400">{z.district}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* P1 Paint Selector */}
             <div className="mt-5">
@@ -888,7 +1079,11 @@ export function GameHud({
                     Checkered Flag · {hud.mapName}
                   </div>
                   <h2 className="text-2xl font-black tracking-tight text-white uppercase">
-                    {finalStandings[0]?.name ?? 'Race'} Wins!
+                    {hud.mode === 'online_2v2' && hud.teamScores
+                      ? hud.teamScores.red >= hud.teamScores.blue
+                        ? `Red Squad Wins (${hud.teamScores.red} - ${hud.teamScores.blue})`
+                        : `Blue Squad Wins (${hud.teamScores.blue} - ${hud.teamScores.red})`
+                      : `${finalStandings[0]?.name ?? 'Race'} Wins!`}
                   </h2>
                 </div>
               </div>
@@ -904,7 +1099,7 @@ export function GameHud({
                       : 'border-slate-800 bg-slate-950 text-slate-300'
                   }`}
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2.5">
                     <span className="w-5 font-mono text-sm font-black text-amber-400">
                       {s.place}.
                     </span>
@@ -912,6 +1107,17 @@ export function GameHud({
                       className="h-4 w-4 border border-white/30"
                       style={{ backgroundColor: `#${s.paintHex.toString(16).padStart(6, '0')}` }}
                     />
+                    {s.team && s.team !== 'ffa' && (
+                      <span
+                        className={`px-1.5 py-0.5 text-[9px] font-black uppercase ${
+                          s.team === 'red'
+                            ? 'bg-rose-500/20 text-rose-300'
+                            : 'bg-sky-500/20 text-sky-300'
+                        }`}
+                      >
+                        {s.team}
+                      </span>
+                    )}
                     <span className="font-mono text-[11px] font-bold text-slate-400">
                       #{s.numberLabel}
                     </span>

@@ -35,6 +35,7 @@ export interface CarVisualRig {
   boostFlameRight: THREE.Mesh;
   bodyPaintMaterial: THREE.MeshPhysicalMaterial;
   setPaintColor: (hex: number) => void;
+  setTeamBadge: (team?: 'red' | 'blue' | 'ffa') => void;
   applyCarSpec: (spec: CarSpec) => void;
   updateFromState: (state: VehicleState, input: VehicleInput, groundY: number, elapsed: number) => void;
   dispose: () => void;
@@ -436,6 +437,30 @@ export function createCarVisualRig(
     end.position.set(sx, 0.09, 2.02);
     chassisGroup.add(end);
   }
+  const rodGeo = track(new THREE.CylinderGeometry(0.014, 0.014, 0.24, 6));
+  for (const rx of [-0.52, 0.52]) {
+    const rod = new THREE.Mesh(rodGeo, titaniumMaterial);
+    rod.position.set(rx, 0.14, 2.18);
+    rod.rotation.x = 0.28;
+    chassisGroup.add(rod);
+  }
+  // Roof Sharkfin Antenna & Team Halo LED Strip
+  const antenna = new THREE.Mesh(track(new THREE.ConeGeometry(0.04, 0.14, 4)), carbonMaterial);
+  antenna.position.set(0, 1.32, -0.45);
+  chassisGroup.add(antenna);
+
+  const teamBadgeMat = track(
+    new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x000000,
+      emissiveIntensity: 0,
+      roughness: 0.2,
+    }),
+  );
+  const teamBadgeBar = new THREE.Mesh(track(new THREE.BoxGeometry(0.84, 0.04, 0.08)), teamBadgeMat);
+  teamBadgeBar.position.set(0, 1.36, 0.26);
+  teamBadgeBar.visible = false;
+  chassisGroup.add(teamBadgeBar);
 
   const skirtGeo = track(new THREE.BoxGeometry(0.16, 0.07, 1.84));
   for (const sx of [-0.94, 0.94]) {
@@ -675,12 +700,12 @@ export function createCarVisualRig(
 
   // --- 8. 4 Articulated Wheel, Suspension, Brake Rotor, Caliper & Lug Bolt Assemblies ---
   const tirePoints = [
-    new THREE.Vector2(0.24, -0.155),
-    new THREE.Vector2(0.39, -0.155),
-    new THREE.Vector2(0.42, -0.11),
-    new THREE.Vector2(0.42, 0.11),
-    new THREE.Vector2(0.39, 0.155),
-    new THREE.Vector2(0.24, 0.155),
+    new THREE.Vector2(0.34, -0.32),
+    new THREE.Vector2(0.62, -0.32),
+    new THREE.Vector2(0.72, -0.22),
+    new THREE.Vector2(0.72, 0.22),
+    new THREE.Vector2(0.62, 0.32),
+    new THREE.Vector2(0.34, 0.32),
   ];
   const tireGeo = track(new THREE.LatheGeometry(tirePoints, 28));
   tireGeo.rotateZ(Math.PI / 2);
@@ -702,10 +727,10 @@ export function createCarVisualRig(
   const wheelSpinPivots: THREE.Group[] = [];
 
   const wheelMountCoords: [number, number, number, boolean][] = [
-    [0.98, 0.0, 1.36, true],
-    [-0.98, 0.0, 1.36, false],
-    [0.98, 0.0, -1.36, true],
-    [-0.98, 0.0, -1.36, false],
+    [1.04, 0.0, 1.36, true],
+    [-1.04, 0.0, 1.36, false],
+    [1.04, 0.0, -1.36, true],
+    [-1.04, 0.0, -1.36, false],
   ];
 
   for (const [wx, wy, wz, isLeft] of wheelMountCoords) {
@@ -797,6 +822,17 @@ export function createCarVisualRig(
     setPaintColor: (hex: number) => {
       bodyPaintMaterial.color.setHex(hex);
     },
+    setTeamBadge: (team?: 'red' | 'blue' | 'ffa') => {
+      if (!team || team === 'ffa') {
+        teamBadgeBar.visible = false;
+      } else {
+        teamBadgeBar.visible = true;
+        const c = team === 'red' ? 0xf43f5e : 0x38bdf8;
+        teamBadgeMat.color.setHex(c);
+        teamBadgeMat.emissive.setHex(c);
+        teamBadgeMat.emissiveIntensity = 1.6;
+      }
+    },
     applyCarSpec: (spec: CarSpec) => {
       bodyPaintMaterial.color.setHex(spec.paintHex);
       stripeMaterial.color.setHex(spec.stripeHex);
@@ -815,16 +851,19 @@ export function createCarVisualRig(
       chassisGroup.rotation.x = state.pitch;
       chassisGroup.rotation.z = state.roll;
 
+      steeringWheel.rotation.z = state.steerAngle * 1.85;
+
       let avgComp = 0;
       for (let i = 0; i < 4; i++) {
         avgComp += state.wheels[i].compression;
-        const wY = -0.14 + (state.wheels[i].compression - 0.5) * 0.16;
+        // Tire outer radius is 0.72m; -0.10 - 0.72 = -0.82m exact flush match with WHEEL_REST_OFFSET
+        const wY = -0.10 + (state.wheels[i].compression - 0.5) * 0.16;
         wheelSuspensions[i].position.y = wY;
         wheelSteerPivots[i].rotation.y = state.wheels[i].steerAngle;
         wheelSpinPivots[i].rotation.x = state.wheels[i].spinAngle;
       }
       avgComp *= 0.25;
-      chassisGroup.position.y = 0.08 - (avgComp - 0.5) * 0.12;
+      chassisGroup.position.y = 0.11 - (avgComp - 0.5) * 0.12;
 
       const heightAboveGround = Math.max(0, state.y - groundY - 0.54);
       contactShadow.position.set(0, Math.max(groundY - state.y + 0.04, -2.5), 0);

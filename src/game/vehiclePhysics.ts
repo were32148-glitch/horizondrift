@@ -1,12 +1,14 @@
 import {
   WORLD_RADIUS,
   clamp,
+  getDrivableSurfaceHeight,
+  getFastGroundSample,
   getMapWorldData,
   getTerrainSample,
-  groundHeightAt,
   lerp,
 } from './terrain';
 import type {
+  BoxCollider,
   CarSpec,
   MapId,
   SurfaceType,
@@ -26,25 +28,27 @@ export interface SurfacePhysicsProps {
 
 export const SURFACE_PARAMS: Record<SurfaceType, SurfacePhysicsProps> = {
   asphalt: { grip: 1.0, rollingDrag: 0.012, offroadDamping: 0.0, maxSteerGrip: 1.0 },
-  dirt: { grip: 0.8, rollingDrag: 0.024, offroadDamping: 0.14, maxSteerGrip: 0.85 },
-  grass: { grip: 0.74, rollingDrag: 0.032, offroadDamping: 0.24, maxSteerGrip: 0.78 },
-  forest: { grip: 0.7, rollingDrag: 0.038, offroadDamping: 0.3, maxSteerGrip: 0.75 },
-  rock: { grip: 0.84, rollingDrag: 0.026, offroadDamping: 0.12, maxSteerGrip: 0.86 },
-  snow: { grip: 0.56, rollingDrag: 0.035, offroadDamping: 0.28, maxSteerGrip: 0.6 },
-  sand: { grip: 0.64, rollingDrag: 0.048, offroadDamping: 0.38, maxSteerGrip: 0.68 },
-  water: { grip: 0.52, rollingDrag: 0.085, offroadDamping: 0.85, maxSteerGrip: 0.55 },
+  concrete: { grip: 0.96, rollingDrag: 0.014, offroadDamping: 0.02, maxSteerGrip: 0.98 },
+  wood: { grip: 0.88, rollingDrag: 0.018, offroadDamping: 0.06, maxSteerGrip: 0.9 },
+  dirt: { grip: 0.78, rollingDrag: 0.045, offroadDamping: 0.35, maxSteerGrip: 0.82 },
+  grass: { grip: 0.65, rollingDrag: 0.12, offroadDamping: 0.85, maxSteerGrip: 0.70 },
+  forest: { grip: 0.62, rollingDrag: 0.11, offroadDamping: 0.75, maxSteerGrip: 0.65 },
+  rock: { grip: 0.75, rollingDrag: 0.075, offroadDamping: 0.50, maxSteerGrip: 0.80 },
+  snow: { grip: 0.52, rollingDrag: 0.08, offroadDamping: 0.55, maxSteerGrip: 0.58 },
+  sand: { grip: 0.60, rollingDrag: 0.09, offroadDamping: 0.65, maxSteerGrip: 0.64 },
+  water: { grip: 0.45, rollingDrag: 0.15, offroadDamping: 1.2, maxSteerGrip: 0.50 },
 };
 
 const CAR_HALF_WIDTH = 0.98;
 const CAR_HALF_LENGTH = 1.85;
-const WHEEL_REST_OFFSET = 0.56;
+const WHEEL_REST_OFFSET = 0.82;
 const GRAVITY = 24.0;
 const CHASSIS_RADIUS = 1.72;
 
 const GEAR_MAX_SPEEDS = [0, 14, 24, 34, 46, 58, 72];
 
 export class ObstacleGrid {
-  private cellSize = 24;
+  private cellSize = 28;
   private buckets = new Map<string, WorldObstacle[]>();
 
   constructor(obstacles: WorldObstacle[]) {
@@ -79,6 +83,54 @@ export class ObstacleGrid {
   }
 }
 
+export class ColliderGrid {
+  private cellSize = 40;
+  private buckets = new Map<string, BoxCollider[]>();
+
+  constructor(colliders: BoxCollider[]) {
+    for (const col of colliders) {
+      const span = Math.hypot(col.halfW, col.halfL) + 2;
+      const minCx = Math.floor((col.x - span) / this.cellSize);
+      const maxCx = Math.floor((col.x + span) / this.cellSize);
+      const minCz = Math.floor((col.z - span) / this.cellSize);
+      const maxCz = Math.floor((col.z + span) / this.cellSize);
+      for (let cx = minCx; cx <= maxCx; cx++) {
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          const key = `${cx},${cz}`;
+          let arr = this.buckets.get(key);
+          if (!arr) {
+            arr = [];
+            this.buckets.set(key, arr);
+          }
+          arr.push(col);
+        }
+      }
+    }
+  }
+
+  queryNear(x: number, z: number, out: BoxCollider[]): BoxCollider[] {
+    out.length = 0;
+    const cx = Math.floor(x / this.cellSize);
+    const cz = Math.floor(z / this.cellSize);
+    _seenColliderIds.clear();
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const arr = this.buckets.get(`${cx + dx},${cz + dz}`);
+        if (arr) {
+          for (let i = 0; i < arr.length; i++) {
+            const c = arr[i];
+            if (!_seenColliderIds.has(c.id)) {
+              _seenColliderIds.add(c.id);
+              out.push(c);
+            }
+          }
+        }
+      }
+    }
+    return out;
+  }
+}
+
 function makeEmptyWheel(): WheelTelemetry {
   return {
     compression: 0.5,
@@ -96,7 +148,7 @@ export function createVehicleStateAt(
   yaw: number,
   mapId: MapId = 'valley',
 ): VehicleState {
-  const spawnY = groundHeightAt(x, z, mapId) + WHEEL_REST_OFFSET;
+  const spawnY = getDrivableSurfaceHeight(x, z, 20, mapId).height + WHEEL_REST_OFFSET;
   return {
     x,
     y: spawnY,
@@ -137,6 +189,18 @@ export function createInitialVehicleState(mapId: MapId = 'valley'): VehicleState
 }
 
 const _nearbyObstacles: WorldObstacle[] = [];
+const _nearbyBoxes: BoxCollider[] = [];
+const _seenColliderIds = new Set<string>();
+const _worldCollidersCache = new Map<MapId, ColliderGrid>();
+
+function getDefaultColliderGrid(mapId: MapId): ColliderGrid {
+  let g = _worldCollidersCache.get(mapId);
+  if (!g) {
+    g = new ColliderGrid(getMapWorldData(mapId).colliders);
+    _worldCollidersCache.set(mapId, g);
+  }
+  return g;
+}
 
 const WHEEL_LOCAL_COORDS: readonly [number, number][] = [
   [CAR_HALF_WIDTH, CAR_HALF_LENGTH * 0.78],
@@ -153,6 +217,7 @@ export function stepVehiclePhysics(
   rawDt: number,
   mapId: MapId = 'valley',
   carSpec?: CarSpec,
+  boxGrid?: ColliderGrid | null,
 ): VehicleState {
   const dt = Math.min(Math.max(rawDt, 0.0001), 0.05);
   state.impactIntensity = 0;
@@ -166,7 +231,7 @@ export function stepVehiclePhysics(
   const leftX = cosYaw;
   const leftZ = -sinYaw;
 
-  const centerSample = getTerrainSample(state.x, state.z, mapId);
+  const centerSample = getTerrainSample(state.x, state.z, mapId, state.y);
   state.surface = centerSample.surface;
   state.biome = centerSample.biome;
 
@@ -181,10 +246,10 @@ export function stepVehiclePhysics(
     const [lx, lz] = WHEEL_LOCAL_COORDS[i];
     const wx = state.x + leftX * lx + fwdX * lz;
     const wz = state.z + leftZ * lx + fwdZ * lz;
-    const wSample = getTerrainSample(wx, wz, mapId);
+    const wSample = getFastGroundSample(wx, wz, mapId, state.y);
     const wheelHubY = state.y - WHEEL_REST_OFFSET * 0.35;
     const clearance = wheelHubY - wSample.height;
-    const suspensionTravel = 0.58;
+    const suspensionTravel = 0.62;
     const isGrounded = clearance <= suspensionTravel;
 
     if (isGrounded) groundedCount++;
@@ -216,7 +281,7 @@ export function stepVehiclePhysics(
   const maxSteer = 0.54;
   const speedSteerScale = clamp(1 - absForward / 76, 0.34, 1.0);
   const targetSteer = input.steer * maxSteer * speedSteerScale;
-  state.steerAngle = lerp(state.steerAngle, targetSteer, 1 - Math.exp(-13 * dt));
+  state.steerAngle = lerp(state.steerAngle, targetSteer, 1 - Math.exp(-16.5 * dt));
 
   state.wheels[0].steerAngle = state.steerAngle;
   state.wheels[1].steerAngle = state.steerAngle;
@@ -238,7 +303,10 @@ export function stepVehiclePhysics(
   const offroadMul = carSpec ? carSpec.offroadMul : 1.0;
   const boostMul = carSpec ? carSpec.boostMul : 1.0;
 
-  const isOffroadSurf = centerSample.surface !== 'asphalt';
+  const isOffroadSurf =
+    centerSample.surface !== 'asphalt' &&
+    centerSample.surface !== 'concrete' &&
+    centerSample.surface !== 'wood';
   const surfProps = SURFACE_PARAMS[centerSample.surface];
   const effectiveGrip =
     surfProps.grip * weather.gripMultiplier * gripMul * (isOffroadSurf ? offroadMul : 1.0);
@@ -332,6 +400,14 @@ export function stepVehiclePhysics(
   state.x += state.vx * dt;
   state.z += state.vz * dt;
 
+  // Absolute anti-seep floor check based on precise drivable surface height (terrain, ramps, or elevated decks)
+  const currentGroundY = getDrivableSurfaceHeight(state.x, state.z, state.y, mapId).height + WHEEL_REST_OFFSET;
+  if (state.y < currentGroundY && state.airTime <= 0) {
+    state.y = currentGroundY;
+    if (state.vy < 0) state.vy = 0;
+  }
+
+  // World outer perimeter boundary
   const distR = Math.hypot(state.x, state.z);
   if (distR > WORLD_RADIUS) {
     const nx = state.x / distR;
@@ -346,10 +422,80 @@ export function stepVehiclePhysics(
     }
   }
 
+  // Oriented Box Colliders (Buildings, Skyscrapers, Barricades, Tire Walls, Containers)
+  const activeBoxGrid = boxGrid === undefined ? getDefaultColliderGrid(mapId) : boxGrid;
+  if (activeBoxGrid) {
+    const nearBoxes = activeBoxGrid.queryNear(state.x, state.z, _nearbyBoxes);
+    for (let i = 0; i < nearBoxes.length; i++) {
+      const col = nearBoxes[i];
+      if (state.y + 0.8 < col.minY || state.y - 0.5 > col.maxY) continue;
+
+      const dx = state.x - col.x;
+      const dz = state.z - col.z;
+      const cos = Math.cos(col.yaw);
+      const sin = Math.sin(col.yaw);
+      const lx = dx * cos - dz * sin;
+      const lz = dx * sin + dz * cos;
+
+      const cx = clamp(lx, -col.halfW, col.halfW);
+      const cz = clamp(lz, -col.halfL, col.halfL);
+      const penX = lx - cx;
+      const penZ = lz - cz;
+      const distSq = penX * penX + penZ * penZ;
+
+      if (distSq < CHASSIS_RADIUS * CHASSIS_RADIUS) {
+        let lnx = 0;
+        let lnz = 0;
+        let overlap = 0;
+
+        if (distSq > 1e-6) {
+          const dist = Math.sqrt(distSq);
+          lnx = penX / dist;
+          lnz = penZ / dist;
+          overlap = CHASSIS_RADIUS - dist;
+        } else {
+          // Car center is inside box -> push out along shortest axis
+          const dxEdge = col.halfW - Math.abs(lx);
+          const dzEdge = col.halfL - Math.abs(lz);
+          if (dxEdge < dzEdge) {
+            lnx = lx >= 0 ? 1 : -1;
+            lnz = 0;
+            overlap = dxEdge + CHASSIS_RADIUS;
+          } else {
+            lnx = 0;
+            lnz = lz >= 0 ? 1 : -1;
+            overlap = dzEdge + CHASSIS_RADIUS;
+          }
+        }
+
+        // Rotate local normal back to world space
+        const nx = lnx * cos + lnz * sin;
+        const nz = -lnx * sin + lnz * cos;
+
+        state.x += nx * overlap;
+        state.z += nz * overlap;
+
+        const vn = state.vx * nx + state.vz * nz;
+        if (vn < 0) {
+          const impact = clamp(-vn / 26, 0.14, 1.0);
+          state.impactIntensity = Math.max(state.impactIntensity, impact);
+          const restitution = col.kind === 'tirewall' ? 0.55 : 0.34;
+          state.vx -= (1 + restitution) * vn * nx;
+          state.vz -= (1 + restitution) * vn * nz;
+          state.vx *= 0.86;
+          state.vz *= 0.86;
+          state.angularVelY += (nx * state.vz - nz * state.vx) * 0.06;
+        }
+      }
+    }
+  }
+
+  // Cylindrical Tree / Boulder / Lamp Colliders
   if (obstacleGrid) {
     const nearby = obstacleGrid.queryNear(state.x, state.z, _nearbyObstacles);
     for (let i = 0; i < nearby.length; i++) {
       const obs = nearby[i];
+      if (state.y > obs.y + obs.height + 1.2) continue;
       const dx = state.x - obs.x;
       const dz = state.z - obs.z;
       const minDist = CHASSIS_RADIUS + obs.radius;
@@ -376,7 +522,9 @@ export function stepVehiclePhysics(
     }
   }
 
-  const targetGroundY = avgWheelGroundY + WHEEL_REST_OFFSET;
+  const prevY = state.y;
+  const maxWheelGroundY = Math.max(flGround, frGround, rlGround, rrGround);
+  const targetGroundY = Math.max(avgWheelGroundY, maxWheelGroundY - 0.22) + WHEEL_REST_OFFSET;
   const prevAirTime = state.airTime;
 
   if (state.y > targetGroundY + 0.28) {
@@ -402,10 +550,15 @@ export function stepVehiclePhysics(
     const vertAccel = heightError * springK - state.vy * damperC;
     state.vy += vertAccel * dt;
     state.y += state.vy * dt;
-    const minFloor = centerSample.height + 0.44;
+    const minFloor = targetGroundY;
     if (state.y < minFloor) {
       state.y = minFloor;
       if (state.vy < 0) state.vy = 0;
+    }
+    // Preserve upward launch momentum when speeding up a steep ramp
+    const actualClimbRate = (state.y - prevY) / dt;
+    if (actualClimbRate > state.vy) {
+      state.vy = clamp(actualClimbRate, 0, 26);
     }
     state.airTime = 0;
     if (prevGrounded === 0 && prevAirTime > 0.22) {
@@ -429,7 +582,7 @@ export function stepVehiclePhysics(
   state.pitch = lerp(state.pitch, terrainPitch + dynamicPitch, 1 - Math.exp(-11 * dt));
   state.roll = lerp(state.roll, terrainRoll + dynamicRoll, 1 - Math.exp(-11 * dt));
 
-  const wheelRadius = 0.42;
+  const wheelRadius = 0.72;
   const wheelAngularSpin = (newForwardVel / wheelRadius) * dt;
   const slipAngle = Math.atan2(Math.abs(newLateralVel), Math.max(Math.abs(newForwardVel), 1.5));
 
