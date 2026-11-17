@@ -436,6 +436,15 @@ export interface HudSnapshot {
   lobbyCode?: string | null;
   teamScores?: { red: number; blue: number };
   reactionBanner?: string | null;
+  isOnFoot?: boolean;
+  characterHealth?: number;
+  characterMaxHealth?: number;
+  characterEnergy?: number;
+  wantedLevel?: number;
+  activePower?: string | null;
+  activePowerSeconds?: number;
+  isCharacterDead?: boolean;
+  nearHouseName?: string | null;
 }
 
 // --- Online Multiplayer & Cloud Lobbies ---

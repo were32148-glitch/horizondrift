@@ -549,6 +549,40 @@ export function createCarVisualRig(
     chassisGroup.add(pod);
   }
 
+  // Police Cruiser Red/Blue Emergency Roof Lightbar
+  const policeLightbarGroup = new THREE.Group();
+  policeLightbarGroup.position.set(0, 1.32, 0.05);
+  policeLightbarGroup.visible = numberLabel === '911';
+  const policeBase = new THREE.Mesh(
+    track(new THREE.BoxGeometry(1.16, 0.06, 0.22)),
+    matteTrimMaterial,
+  );
+  policeLightbarGroup.add(policeBase);
+  const policeRedMat = track(
+    new THREE.MeshStandardMaterial({
+      color: 0xef4444,
+      emissive: 0xff1e2d,
+      emissiveIntensity: 3.2,
+      roughness: 0.15,
+    }),
+  );
+  const policeBlueMat = track(
+    new THREE.MeshStandardMaterial({
+      color: 0x3b82f6,
+      emissive: 0x2563eb,
+      emissiveIntensity: 3.2,
+      roughness: 0.15,
+    }),
+  );
+  const sirenPodGeo = track(new THREE.BoxGeometry(0.48, 0.09, 0.2));
+  const redSirenMesh = new THREE.Mesh(sirenPodGeo, policeRedMat);
+  redSirenMesh.position.set(0.3, 0.05, 0);
+  policeLightbarGroup.add(redSirenMesh);
+  const blueSirenMesh = new THREE.Mesh(sirenPodGeo, policeBlueMat);
+  blueSirenMesh.position.set(-0.3, 0.05, 0);
+  policeLightbarGroup.add(blueSirenMesh);
+  chassisGroup.add(policeLightbarGroup);
+
   // --- 7. Front Grille + Visible Intercooler Radiator + Headlights + Rear Fascia + Quad Exhaust ---
   const grilleGeo = track(new THREE.BoxGeometry(1.18, 0.24, 0.08));
   const grille = new THREE.Mesh(grilleGeo, matteTrimMaterial);
@@ -840,7 +874,8 @@ export function createCarVisualRig(
       upperWing.visible =
         spec.bodyStyle === 'track' || spec.bodyStyle === 'hyper' || spec.bodyStyle === 'legend';
       dorsalFin.visible = spec.bodyStyle === 'hyper' || spec.bodyStyle === 'legend';
-      bullbar.visible = spec.bodyStyle === 'baja';
+      bullbar.visible = spec.bodyStyle === 'baja' || spec.id === 'police_cruiser';
+      policeLightbarGroup.visible = spec.id === 'police_cruiser';
     },
     updateFromState: (state: VehicleState, input: VehicleInput, groundY: number, elapsed: number) => {
       root.position.set(state.x, state.y, state.z);
@@ -881,6 +916,12 @@ export function createCarVisualRig(
       headlightSpotRight.intensity = enableSpotLights && lightsOn ? 28 : 0;
       headlightConeLeft.visible = lightsOn;
       headlightConeRight.visible = lightsOn;
+
+      if (policeLightbarGroup.visible) {
+        const flashPhase = Math.sin(elapsed * 18) > 0;
+        policeRedMat.emissiveIntensity = flashPhase ? 4.8 : 0.35;
+        policeBlueMat.emissiveIntensity = flashPhase ? 0.35 : 4.8;
+      }
 
       const showFlame = state.isBoosting;
       boostFlames[0].visible = showFlame;

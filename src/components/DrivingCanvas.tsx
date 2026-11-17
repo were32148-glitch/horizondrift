@@ -5,6 +5,10 @@ import { ProceduralAudioEngine } from '../game/audio';
 import { createCarVisualRig, type CarVisualRig } from '../game/carModel';
 import { getCarSpec } from '../game/cars';
 import {
+  FreestyleActionController,
+  type FreestyleActionEvent,
+} from '../game/freestyleAction';
+import {
   FREESTYLE_TRAFFIC_VARIANTS,
   FreestyleTrafficController,
 } from '../game/freestyleTraffic';
@@ -20,7 +24,6 @@ import {
   clamp,
   getDrivableSurfaceHeight,
   getMapWorldData,
-  groundHeightAt,
   lerp,
 } from '../game/terrain';
 import { createProceduralTextures } from '../game/textures';
@@ -64,6 +67,8 @@ export interface DrivingControllerHandle {
   toggleMute: () => boolean;
   initAudio: () => void;
   toggleOnFoot: () => void;
+  triggerAttack: () => void;
+  useEnergyDrink: () => void;
 }
 
 interface DrivingCanvasProps {
@@ -76,10 +81,6 @@ interface DrivingCanvasProps {
   lobbyState: LobbyState | null;
   localClientId: string | null;
   remoteSnapshots: RemotePlayerSnapshot[];
-  isOnFoot: boolean;
-  onToggleOnFoot: () => void;
-  characterHealth: number;
-  wantedLevel: number;
   equippedCharacter: CharacterId;
   equippedWeapon: WeaponId;
   onHudUpdate: (hud: HudSnapshot) => void;
@@ -89,6 +90,7 @@ interface DrivingCanvasProps {
   onRaceFinished: (standings: RaceStandingSummary[]) => void;
   onSendSnapshot?: (snapshot: RemotePlayerSnapshot) => void;
   onReactionEvent?: (evt: HitReactionEvent) => void;
+  onActionBanner?: (msg: string) => void;
 }
 
 const CAMERA_ORDER: CameraMode[] = ['chase', 'drift', 'hood'];
@@ -125,10 +127,6 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       lobbyState,
       localClientId,
       remoteSnapshots,
-      isOnFoot,
-      onToggleOnFoot,
-      characterHealth,
-      wantedLevel,
       equippedCharacter,
       equippedWeapon,
       onHudUpdate,
@@ -138,6 +136,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       onRaceFinished,
       onSendSnapshot,
       onReactionEvent,
+      onActionBanner,
     },
     ref,
   ) {
@@ -147,6 +146,8 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
     const lobbyRef = useRef<LobbyState | null>(lobbyState);
     const localClientIdRef = useRef<string | null>(localClientId);
     const remoteSnapshotsRef = useRef<RemotePlayerSnapshot[]>(remoteSnapshots);
+    const equippedCharacterRef = useRef<CharacterId>(equippedCharacter);
+    const equippedWeaponRef = useRef<WeaponId>(equippedWeapon);
     const carSpecsRef = useRef({
       p1: getCarSpec(carIdP1),
       p2: getCarSpec(carIdP2),
@@ -159,7 +160,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       onRaceFinished,
       onSendSnapshot,
       onReactionEvent,
-      onToggleOnFoot,
+      onActionBanner,
     });
 
     phaseRef.current = phase;
@@ -167,6 +168,8 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
     lobbyRef.current = lobbyState;
     localClientIdRef.current = localClientId;
     remoteSnapshotsRef.current = remoteSnapshots;
+    equippedCharacterRef.current = equippedCharacter;
+    equippedWeaponRef.current = equippedWeapon;
     callbacksRef.current = {
       onHudUpdate,
       onPhaseHotkey,
@@ -175,13 +178,15 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       onRaceFinished,
       onSendSnapshot,
       onReactionEvent,
-      onToggleOnFoot,
+      onActionBanner,
     };
 
     const audioRef = useRef<ProceduralAudioEngine | null>(null);
     const worldRigRef = useRef<WorldVisualRig | null>(null);
     const carRigsRef = useRef<CarVisualRig[]>([]);
     const freestyleTrafficRef = useRef<FreestyleTrafficController | null>(null);
+    const freestyleActionRef = useRef<FreestyleActionController | null>(null);
+    const livingWorldRef = useRef<LivingWorldController | null>(null);
     const snapRaceCamerasRef = useRef<(() => void) | null>(null);
     const worldData = useMemo(() => getMapWorldData(mapId), [mapId]);
 
@@ -219,6 +224,11 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
 
     const sim = simStateRef.current;
 
+    // Live-update character and weapon when changed in Garage
+    useEffect(() => {
+      freestyleActionRef.current?.setCharacterAndWeapon(equippedCharacter, equippedWeapon);
+    }, [equippedCharacter, equippedWeapon]);
+
     // Live-update car specs when user equips a car in the Garage
     useEffect(() => {
       const simCur = simStateRef.current;
@@ -246,6 +256,18 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         carRigsRef.current[1].applyCarSpec(s2);
       }
     }, [carIdP1, carIdP2, mode]);
+
+    const handleActionEventInternal = (evt: FreestyleActionEvent) => {
+      if (evt.coinsAwarded > 0 && simStateRef.current) {
+        simStateRef.current.runCoins += evt.coinsAwarded;
+        audioRef.current?.playCoinChime();
+        callbacksRef.current.onCoinsEarned(
+          evt.coinsAwarded,
+          `+${evt.coinsAwarded} COINS · ${evt.title}`,
+        );
+      }
+      callbacksRef.current.onActionBanner?.(evt.title);
+    };
 
     const resetRaceState = () => {
       const simCur = simStateRef.current;
@@ -279,6 +301,14 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
       simCur.runCoins = 0;
       worldRigRef.current?.resetCoins();
       freestyleTrafficRef.current?.reset();
+      if (freestyleActionRef.current) {
+        freestyleActionRef.current.isOnFoot = false;
+        freestyleActionRef.current.wantedLevel = 0;
+        freestyleActionRef.current.health = freestyleActionRef.current.maxHealth;
+        freestyleActionRef.current.energy = 100;
+        freestyleActionRef.current.isDead = false;
+        freestyleActionRef.current.dismissAllPolice();
+      }
       simCur.countdownSeconds = mode === 'freestyle' ? 0 : 2.4;
       simCur.raceElapsed = 0;
       simCur.raceFinishedSent = false;
@@ -337,6 +367,12 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         r.vehicle.yaw = yaw;
         r.vehicle.pitch = 0;
         r.vehicle.roll = 0;
+        if (freestyleActionRef.current?.isOnFoot) {
+          freestyleActionRef.current.charX = x - Math.cos(yaw) * 2.8;
+          freestyleActionRef.current.charZ = z + Math.sin(yaw) * 2.8;
+          freestyleActionRef.current.charY = groundY;
+          freestyleActionRef.current.charYaw = yaw;
+        }
         snapRaceCamerasRef.current?.();
       },
       setWeatherPreset: (preset: WeatherPreset) => {
@@ -377,7 +413,44 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         audioRef.current?.initOnGesture();
       },
       toggleOnFoot: () => {
-        callbacksRef.current.onToggleOnFoot?.();
+        const fa = freestyleActionRef.current;
+        const r = sim.racers[0];
+        if (!fa || !r) return;
+        const nowOnFoot = fa.toggleOnFoot(r.vehicle);
+        callbacksRef.current.onActionBanner?.(
+          nowOnFoot ? 'ON FOOT — WASD MOVE · SPACE/F ATTACK' : 'ENTERED VEHICLE',
+        );
+      },
+      triggerAttack: () => {
+        const fa = freestyleActionRef.current;
+        if (!fa) return;
+        if (!fa.isOnFoot && sim.racers[0]) {
+          fa.toggleOnFoot(sim.racers[0].vehicle);
+        }
+        fa.triggerWeaponAttack(
+          livingWorldRef.current,
+          (evt) => {
+            audioRef.current?.playReactionSound(evt.sound);
+            if (evt.coinsAwarded && evt.coinsAwarded > 0 && simStateRef.current) {
+              simStateRef.current.runCoins += evt.coinsAwarded;
+              audioRef.current?.playCoinChime();
+              callbacksRef.current.onCoinsEarned(
+                evt.coinsAwarded,
+                `+${evt.coinsAwarded} COINS · ${evt.label.toUpperCase()}`,
+              );
+            }
+            callbacksRef.current.onReactionEvent?.(evt);
+          },
+          handleActionEventInternal,
+        );
+      },
+      useEnergyDrink: () => {
+        const fa = freestyleActionRef.current;
+        if (!fa) return;
+        if (fa.useEnergyDrink()) {
+          audioRef.current?.playBeaconChime();
+          callbacksRef.current.onActionBanner?.('ENERGY DRINK USED — 100% FULL HP & ENERGY!');
+        }
       },
     }));
 
@@ -460,6 +533,20 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
 
       const livingWorld = new LivingWorldController(mapId, mode);
       scene.add(livingWorld.group);
+      livingWorldRef.current = livingWorld;
+
+      const freestyleAction =
+        mode === 'freestyle'
+          ? new FreestyleActionController(
+              mapId,
+              equippedCharacterRef.current,
+              equippedWeaponRef.current,
+            )
+          : null;
+      if (freestyleAction) {
+        scene.add(freestyleAction.group);
+      }
+      freestyleActionRef.current = freestyleAction;
 
       const freestyleTraffic =
         mode === 'freestyle'
@@ -521,6 +608,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
           spec ? spec.bodyStyle : 'gt',
           spec ? spec.rimHex : 0xd9bc7e,
         );
+        if (spec) rig.applyCarSpec(spec);
         rig.setTeamBadge(p.team);
         scene.add(rig.root);
         carRigs.push(rig);
@@ -543,7 +631,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         const code = e.code;
         if (
           phaseRef.current === 'playing' &&
-          ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code)
+          ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'CapsLock'].includes(code)
         ) {
           e.preventDefault();
         }
@@ -589,8 +677,39 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         } else if (code === 'KeyM') {
           audioEngine.toggleMute();
           callbacksRef.current.onPhaseHotkey('mute');
-        } else if (code === 'KeyE') {
-          callbacksRef.current.onToggleOnFoot?.();
+        } else if (code === 'KeyE' && freestyleAction) {
+          const curSim = simStateRef.current!;
+          if (curSim.racers[0]) {
+            const nowOnFoot = freestyleAction.toggleOnFoot(curSim.racers[0].vehicle);
+            callbacksRef.current.onActionBanner?.(
+              nowOnFoot ? 'ON FOOT — WASD MOVE · SPACE/F ATTACK' : 'ENTERED VEHICLE',
+            );
+          }
+        } else if (code === 'KeyF' && freestyleAction) {
+          if (!freestyleAction.isOnFoot && simStateRef.current?.racers[0]) {
+            freestyleAction.toggleOnFoot(simStateRef.current.racers[0].vehicle);
+          }
+          freestyleAction.triggerWeaponAttack(
+            livingWorld,
+            (evt) => {
+              audioEngine.playReactionSound(evt.sound);
+              if (evt.coinsAwarded && evt.coinsAwarded > 0 && simStateRef.current) {
+                simStateRef.current.runCoins += evt.coinsAwarded;
+                audioEngine.playCoinChime();
+                callbacksRef.current.onCoinsEarned(
+                  evt.coinsAwarded,
+                  `+${evt.coinsAwarded} COINS · ${evt.label.toUpperCase()}`,
+                );
+              }
+              callbacksRef.current.onReactionEvent?.(evt);
+            },
+            handleActionEventInternal,
+          );
+        } else if (code === 'KeyG' && freestyleAction) {
+          if (freestyleAction.useEnergyDrink()) {
+            audioEngine.playBeaconChime();
+            callbacksRef.current.onActionBanner?.('ENERGY DRINK USED — 100% FULL HP & ENERGY!');
+          }
         }
       };
 
@@ -602,10 +721,65 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         if (document.hidden) clearInputs();
       };
 
+      // Manual aiming pointer tracking for On-Foot mode
+      const pointerNdc = new THREE.Vector2();
+      const aimRaycaster = new THREE.Raycaster();
+      const aimPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+      const aimHitPoint = new THREE.Vector3();
+      let aimWorldX: number | null = null;
+      let aimWorldZ: number | null = null;
+      let pointerMovedRecently = 0;
+
+      const updateAimFromPointer = (clientX: number, clientY: number) => {
+        if (!freestyleAction || !freestyleAction.isOnFoot || phaseRef.current !== 'playing') return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        aimPlane.constant = -(freestyleAction.charY + 1.15);
+        aimRaycaster.setFromCamera(pointerNdc, cameraP1);
+        if (aimRaycaster.ray.intersectPlane(aimPlane, aimHitPoint)) {
+          aimWorldX = aimHitPoint.x;
+          aimWorldZ = aimHitPoint.z;
+          pointerMovedRecently = 0.25;
+          freestyleAction.setManualAimTarget(aimWorldX, aimWorldZ);
+        }
+      };
+
+      const handlePointerMove = (e: PointerEvent) => {
+        updateAimFromPointer(e.clientX, e.clientY);
+      };
+
+      const handlePointerDown = (e: PointerEvent) => {
+        if (e.button !== 0 || !freestyleAction || !freestyleAction.isOnFoot || phaseRef.current !== 'playing') {
+          return;
+        }
+        audioEngine.initOnGesture();
+        updateAimFromPointer(e.clientX, e.clientY);
+        freestyleAction.triggerWeaponAttack(
+          livingWorld,
+          (evt) => {
+            audioEngine.playReactionSound(evt.sound);
+            if (evt.coinsAwarded && evt.coinsAwarded > 0 && simStateRef.current) {
+              simStateRef.current.runCoins += evt.coinsAwarded;
+              audioEngine.playCoinChime();
+              callbacksRef.current.onCoinsEarned(
+                evt.coinsAwarded,
+                `+${evt.coinsAwarded} COINS · ${evt.label.toUpperCase()}`,
+              );
+            }
+            callbacksRef.current.onReactionEvent?.(evt);
+          },
+          handleActionEventInternal,
+        );
+      };
+
       window.addEventListener('keydown', handleKeyDown);
       window.addEventListener('keyup', handleKeyUp);
       window.addEventListener('blur', clearInputs);
       document.addEventListener('visibilitychange', handleVisibility);
+      renderer.domElement.addEventListener('pointermove', handlePointerMove);
+      renderer.domElement.addEventListener('pointerdown', handlePointerDown);
 
       let viewW = initW;
       let viewH = initH;
@@ -838,17 +1012,25 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
                 continue;
               }
               if (r.profile.playerIndex === 0) {
-                const allowArrowsAlso = mode !== 'race2p';
-                const up = keysDown.has('KeyW') || (allowArrowsAlso && keysDown.has('ArrowUp'));
-                const down = keysDown.has('KeyS') || (allowArrowsAlso && keysDown.has('ArrowDown'));
-                const left = keysDown.has('KeyA') || (allowArrowsAlso && keysDown.has('ArrowLeft'));
-                const right = keysDown.has('KeyD') || (allowArrowsAlso && keysDown.has('ArrowRight'));
-                inp.throttle = up ? 1 : 0;
-                inp.brake = down ? 1 : 0;
-                inp.steer = (left ? 1 : 0) - (right ? 1 : 0);
-                inp.handbrake = keysDown.has('Space');
-                inp.boost =
-                  keysDown.has('ShiftLeft') || (allowArrowsAlso && keysDown.has('ShiftRight'));
+                if (freestyleAction?.isOnFoot) {
+                  // Parked vehicle while player character is walking on foot
+                  zeroInput(inp);
+                  inp.handbrake = true;
+                } else {
+                  const allowArrowsAlso = mode !== 'race2p';
+                  const up = keysDown.has('KeyW') || (allowArrowsAlso && keysDown.has('ArrowUp'));
+                  const down = keysDown.has('KeyS') || (allowArrowsAlso && keysDown.has('ArrowDown'));
+                  const left = keysDown.has('KeyA') || (allowArrowsAlso && keysDown.has('ArrowLeft'));
+                  const right = keysDown.has('KeyD') || (allowArrowsAlso && keysDown.has('ArrowRight'));
+                  inp.throttle = up ? 1 : 0;
+                  inp.brake = down ? 1 : 0;
+                  inp.steer = (left ? 1 : 0) - (right ? 1 : 0);
+                  inp.handbrake = keysDown.has('Space');
+                  // Player 1 Nitro control is CapsLock (plus Mystery Box SUPER SPEED power)
+                  inp.boost =
+                    keysDown.has('CapsLock') ||
+                    freestyleAction?.activePower === 'SUPER SPEED';
+                }
               } else if (r.profile.playerIndex === 1) {
                 inp.throttle = keysDown.has('ArrowUp') ? 1 : 0;
                 inp.brake = keysDown.has('ArrowDown') ? 1 : 0;
@@ -857,7 +1039,8 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
                   keysDown.has('Enter') ||
                   keysDown.has('ControlRight') ||
                   keysDown.has('Slash');
-                inp.boost = keysDown.has('ShiftRight');
+                // Player 2 Nitro control is Shift
+                inp.boost = keysDown.has('ShiftLeft') || keysDown.has('ShiftRight');
               } else {
                 computeAiVehicleInput(r, racers, activeWorld, inp);
               }
@@ -932,9 +1115,55 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
 
             resolveCarToCarCollisions(allVehiclesScratch);
 
+            // Step Freestyle On-Foot Character, Manual Aiming, Gold Bullets, Police Pursuit, Mystery Boxes & Energy Drinks
+            if (freestyleAction && racers[0]) {
+              if (pointerMovedRecently > 0) {
+                pointerMovedRecently = Math.max(0, pointerMovedRecently - dt);
+              }
+              const up = keysDown.has('KeyW') || keysDown.has('ArrowUp');
+              const down = keysDown.has('KeyS') || keysDown.has('ArrowDown');
+              const left = keysDown.has('KeyA') || keysDown.has('ArrowLeft') || keysDown.has('KeyQ');
+              const right = keysDown.has('KeyD') || keysDown.has('ArrowRight') || keysDown.has('KeyR');
+              const turnVal = (left ? 1 : 0) - (right ? 1 : 0);
+              if (turnVal !== 0) {
+                aimWorldX = null;
+                aimWorldZ = null;
+              }
+              freestyleAction.update(
+                dt,
+                elapsed,
+                racers[0].vehicle,
+                {
+                  forward: (up ? 1 : 0) - (down ? 1 : 0),
+                  turn: turnVal,
+                  sprint: keysDown.has('CapsLock') || keysDown.has('ShiftLeft'),
+                  attack: keysDown.has('Space') || keysDown.has('KeyF'),
+                  aimWorldX: pointerMovedRecently > 0 ? aimWorldX : null,
+                  aimWorldZ: pointerMovedRecently > 0 ? aimWorldZ : null,
+                },
+                livingWorld,
+                (evt) => {
+                  audioEngine.playReactionSound(evt.sound);
+                  if (evt.coinsAwarded && evt.coinsAwarded > 0) {
+                    simCur.runCoins += evt.coinsAwarded;
+                    audioEngine.playCoinChime();
+                    callbacksRef.current.onCoinsEarned(
+                      evt.coinsAwarded,
+                      `+${evt.coinsAwarded} COINS · ${evt.label.toUpperCase()}`,
+                    );
+                  }
+                  callbacksRef.current.onReactionEvent?.(evt);
+                },
+                handleActionEventInternal,
+              );
+            }
+
             // Step Humans & 23 Animal Species AI + Reactions
             livingWorld.update(dt, elapsed, allVehiclesScratch, (evt) => {
               audioEngine.playReactionSound(evt.sound);
+              if (evt.isKill) {
+                freestyleAction?.reportCrime(1);
+              }
               if (evt.coinsAwarded && evt.coinsAwarded > 0) {
                 simCur.runCoins += evt.coinsAwarded;
                 audioEngine.playCoinChime();
@@ -994,15 +1223,18 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
               }
             }
 
-            // Gold Coin Pickup checks for local human cars
+            // Gold Coin Pickup checks for local human cars & on-foot character
             for (let ci = 0; ci < activeWorld.coins.length; ci++) {
               if (simCur.collectedCoins.has(ci)) continue;
               const coin = activeWorld.coins[ci];
               for (const r of racers) {
                 if (!r.profile.isHuman || r.profile.isRemote) continue;
-                const dx = r.vehicle.x - coin.x;
-                const dz = r.vehicle.z - coin.z;
-                const dy = r.vehicle.y - coin.y;
+                const px = freestyleAction?.isOnFoot ? freestyleAction.charX : r.vehicle.x;
+                const py = freestyleAction?.isOnFoot ? freestyleAction.charY + 0.8 : r.vehicle.y;
+                const pz = freestyleAction?.isOnFoot ? freestyleAction.charZ : r.vehicle.z;
+                const dx = px - coin.x;
+                const dz = pz - coin.z;
+                const dy = py - coin.y;
                 if (dx * dx + dz * dz <= 4.3 * 4.3 && Math.abs(dy) <= 3.6) {
                   simCur.collectedCoins.add(ci);
                   simCur.runCoins += coin.value;
@@ -1014,12 +1246,14 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
               }
             }
 
-            // Exploration Beacons check for local human cars
+            // Exploration Beacons check for local human cars & on-foot character
             for (const b of activeWorld.beacons) {
               if (simCur.discovered.has(b.id)) continue;
               for (const r of racers) {
                 if (!r.profile.isHuman || r.profile.isRemote) continue;
-                if (Math.hypot(r.vehicle.x - b.x, r.vehicle.z - b.z) <= b.radius) {
+                const px = freestyleAction?.isOnFoot ? freestyleAction.charX : r.vehicle.x;
+                const pz = freestyleAction?.isOnFoot ? freestyleAction.charZ : r.vehicle.z;
+                if (Math.hypot(px - b.x, pz - b.z) <= b.radius) {
                   simCur.discovered.add(b.id);
                   worldRig.markBeaconDiscovered(b.id);
                   audioEngine.playBeaconChime();
@@ -1071,6 +1305,9 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         }
 
         // Lighting & Fog sync
+        const focusX = freestyleAction?.isOnFoot ? freestyleAction.charX : p1.x;
+        const focusY = freestyleAction?.isOnFoot ? freestyleAction.charY : p1.y;
+        const focusZ = freestyleAction?.isOnFoot ? freestyleAction.charZ : p1.z;
         const sunElev = simCur.weather.sunElevation;
         const sunAzim = simCur.weather.sunAzimuth;
         const sunR = Math.cos(sunElev);
@@ -1079,12 +1316,12 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
           Math.sin(sunElev) * 120,
           Math.cos(sunAzim) * sunR * 120,
         );
-        sunLight.position.set(p1.x + _sunPos.x, Math.max(18, p1.y + _sunPos.y), p1.z + _sunPos.z);
-        sunLight.target.position.set(p1.x, p1.y, p1.z);
+        sunLight.position.set(focusX + _sunPos.x, Math.max(18, focusY + _sunPos.y), focusZ + _sunPos.z);
+        sunLight.target.position.set(focusX, focusY, focusZ);
         sunLight.target.updateMatrixWorld();
 
-        rimLight.position.set(p1.x - _sunPos.x * 0.6, p1.y + 32, p1.z - _sunPos.z * 0.6);
-        rimLight.target.position.set(p1.x, p1.y, p1.z);
+        rimLight.position.set(focusX - _sunPos.x * 0.6, focusY + 32, focusZ - _sunPos.z * 0.6);
+        rimLight.target.position.set(focusX, focusY, focusZ);
         rimLight.target.updateMatrixWorld();
         rimLight.intensity = simCur.weather.isDark ? 0.28 : 0.55;
 
@@ -1137,6 +1374,29 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
           }
           updateFollowCamera(cameraP1, camLookP1, racers[0].vehicle, simCur.cameraMode, dt);
           updateFollowCamera(cameraP2, camLookP2, racers[1].vehicle, simCur.cameraMode, dt);
+        } else if (freestyleAction?.isOnFoot) {
+          const asp = viewW / Math.max(1, viewH);
+          if (Math.abs(cameraP1.aspect - asp) > 0.01) {
+            cameraP1.aspect = asp;
+            cameraP1.updateProjectionMatrix();
+          }
+          const cSin = Math.sin(freestyleAction.charYaw);
+          const cCos = Math.cos(freestyleAction.charYaw);
+          _camDesired.set(
+            freestyleAction.charX - cSin * 5.2,
+            freestyleAction.charY + 2.55,
+            freestyleAction.charZ - cCos * 5.2,
+          );
+          _camLookTarget.set(
+            freestyleAction.charX + cSin * 4.5,
+            freestyleAction.charY + 1.35,
+            freestyleAction.charZ + cCos * 4.5,
+          );
+          cameraP1.position.lerp(_camDesired, 1 - Math.exp(-16 * dt));
+          camLookP1.lerp(_camLookTarget, 1 - Math.exp(-20 * dt));
+          cameraP1.fov = lerp(cameraP1.fov, 64, 1 - Math.exp(-8 * dt));
+          cameraP1.updateProjectionMatrix();
+          cameraP1.lookAt(camLookP1);
         } else {
           const asp = viewW / Math.max(1, viewH);
           if (Math.abs(cameraP1.aspect - asp) > 0.01) {
@@ -1183,6 +1443,7 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
           for (let i = 0; i < totalRacers; i++) {
             const r = racers[i];
             if (r.profile.isHuman) {
+              const onFootP1 = i === 0 && freestyleAction?.isOnFoot;
               players.push({
                 name: r.profile.name,
                 carName:
@@ -1190,7 +1451,9 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
                     ? carSpecsRef.current.p1.name
                     : carSpecsRef.current.p2.name,
                 team: r.profile.team,
-                speedKmh: r.vehicle.speedKmh,
+                speedKmh: onFootP1
+                  ? Math.round(Math.abs(freestyleAction!.charSpeed) * 3.6)
+                  : r.vehicle.speedKmh,
                 rpm: Math.round(r.vehicle.rpm),
                 gear: r.vehicle.gear,
                 boostFuel: Math.round(r.vehicle.boostFuel),
@@ -1206,9 +1469,9 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
                 totalRacers,
                 finished: r.finished,
                 finishTime: r.finishTime,
-                x: r.vehicle.x,
-                z: r.vehicle.z,
-                yaw: r.vehicle.yaw,
+                x: onFootP1 ? freestyleAction!.charX : r.vehicle.x,
+                z: onFootP1 ? freestyleAction!.charZ : r.vehicle.z,
+                yaw: onFootP1 ? freestyleAction!.charYaw : r.vehicle.yaw,
               });
             } else {
               aiDots.push({
@@ -1233,6 +1496,17 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
               });
             }
           }
+          if (freestyleAction) {
+            for (const c of freestyleAction.policeCruisers) {
+              if (!c.active) continue;
+              aiDots.push({
+                x: c.x,
+                z: c.z,
+                yaw: c.yaw,
+                color: 0x3b82f6,
+              });
+            }
+          }
 
           callbacksRef.current.onHudUpdate({
             mode,
@@ -1254,6 +1528,15 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
             runCoins: simCur.runCoins,
             lobbyCode: lobbyRef.current?.code ?? null,
             teamScores: mode === 'online_2v2' ? computeTeamScores(racers) : undefined,
+            isOnFoot: freestyleAction?.isOnFoot ?? false,
+            characterHealth: freestyleAction ? Math.round(freestyleAction.health) : 100,
+            characterMaxHealth: freestyleAction ? Math.round(freestyleAction.maxHealth) : 100,
+            characterEnergy: freestyleAction ? Math.round(freestyleAction.energy) : 100,
+            wantedLevel: freestyleAction?.wantedLevel ?? 0,
+            activePower: freestyleAction?.activePower ?? null,
+            activePowerSeconds: freestyleAction ? Math.ceil(freestyleAction.activePowerTimer) : 0,
+            isCharacterDead: freestyleAction?.isDead ?? false,
+            nearHouseName: freestyleAction?.nearHouseName ?? null,
           });
         }
 
@@ -1275,9 +1558,14 @@ export const DrivingCanvas = forwardRef<DrivingControllerHandle, DrivingCanvasPr
         window.removeEventListener('keyup', handleKeyUp);
         window.removeEventListener('blur', clearInputs);
         document.removeEventListener('visibilitychange', handleVisibility);
+        renderer.domElement.removeEventListener('pointermove', handlePointerMove);
+        renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
         audioEngine.dispose();
         weatherRig.dispose();
         livingWorld.dispose();
+        livingWorldRef.current = null;
+        freestyleAction?.dispose();
+        freestyleActionRef.current = null;
         trafficRigs.forEach((rig) => rig.dispose());
         freestyleTrafficRef.current = null;
         carRigs.forEach((c) => c.dispose());

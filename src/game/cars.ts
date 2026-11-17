@@ -113,13 +113,16 @@ export interface CharacterSpec {
   description: string;
   price: number;
   armorBonus: number;
+  shirtHex: number;
+  pantsHex: number;
+  accentHex: number;
 }
 
 export const CHARACTER_ROSTER: CharacterSpec[] = [
-  { id: 'default', name: 'Civilian Drifter', description: 'Standard driver outfit.', price: 0, armorBonus: 0 },
-  { id: 'detective', name: 'LSPD Detective', description: 'Undercover tactical gear with improved pistol handling.', price: 200, armorBonus: 25 },
-  { id: 'street_boss', name: 'Los Santos Kingpin', description: 'Elite custom armor and intimidation bonus.', price: 450, armorBonus: 50 },
-  { id: 'special_ops', name: 'SWAT Special Ops', description: 'Heavy ballistic body armor and maximum protection.', price: 800, armorBonus: 100 },
+  { id: 'default', name: 'Civilian Drifter', description: 'Standard driver outfit.', price: 0, armorBonus: 0, shirtHex: 0x0284c7, pantsHex: 0x1e293b, accentHex: 0x38bdf8 },
+  { id: 'detective', name: 'LSPD Detective', description: 'Undercover tactical gear with improved pistol handling.', price: 200, armorBonus: 25, shirtHex: 0x1e3a8a, pantsHex: 0x0f172a, accentHex: 0xfacc15 },
+  { id: 'street_boss', name: 'Los Santos Kingpin', description: 'Elite custom armor and intimidation bonus.', price: 450, armorBonus: 50, shirtHex: 0x7e22ce, pantsHex: 0x111827, accentHex: 0xf43f5e },
+  { id: 'special_ops', name: 'SWAT Special Ops', description: 'Heavy ballistic body armor and maximum protection.', price: 800, armorBonus: 100, shirtHex: 0x065f46, pantsHex: 0x09090b, accentHex: 0x10b981 },
 ];
 
 export interface WeaponSpec {
@@ -127,15 +130,17 @@ export interface WeaponSpec {
   name: string;
   damage: number;
   fireRate: number;
+  range: number;
+  CooldownSec: number;
   price: number;
 }
 
 export const WEAPON_ROSTER: WeaponSpec[] = [
-  { id: 'fists', name: 'Combat Fists', damage: 15, fireRate: 2.0, price: 0 },
-  { id: 'pistol', name: '9mm Pistol', damage: 35, fireRate: 4.0, price: 100 },
-  { id: 'shotgun', name: 'Pump Shotgun', damage: 85, fireRate: 1.2, price: 250 },
-  { id: 'assault_rifle', name: 'Carbine Rifle', damage: 45, fireRate: 10.0, price: 500 },
-  { id: 'minigun', name: 'Heavy Minigun', damage: 110, fireRate: 25.0, price: 1200 },
+  { id: 'fists', name: 'Combat Fists', damage: 25, fireRate: 2.0, range: 3.6, CooldownSec: 0.42, price: 0 },
+  { id: 'pistol', name: '9mm Pistol', damage: 42, fireRate: 4.0, range: 28, CooldownSec: 0.28, price: 100 },
+  { id: 'shotgun', name: 'Pump Shotgun', damage: 90, fireRate: 1.2, range: 18, CooldownSec: 0.65, price: 250 },
+  { id: 'assault_rifle', name: 'Carbine Rifle', damage: 55, fireRate: 10.0, range: 40, CooldownSec: 0.14, price: 500 },
+  { id: 'minigun', name: 'Heavy Minigun', damage: 115, fireRate: 25.0, range: 48, CooldownSec: 0.08, price: 1200 },
 ];
 
 export function getCarSpec(id: CarId): CarSpec {

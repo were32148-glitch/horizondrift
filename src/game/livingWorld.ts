@@ -840,19 +840,154 @@ export class LivingWorldController {
     }
   }
 
+  public spawnExternalBlood(
+    x: number,
+    y: number,
+    z: number,
+    vx = 0,
+    vz = 0,
+    burstCount = 18,
+    poolRadius = 1.1,
+  ): void {
+    this.spawnBloodBurst(x, y, z, vx, vz, burstCount);
+    const floor = groundHeightAt(x, z, this.mapId);
+    if (poolRadius > 0) {
+      this.spawnBloodPool(x, floor, z, poolRadius);
+    }
+  }
+
+  public attackActorsWithWeapon(
+    originX: number,
+    originY: number,
+    originZ: number,
+    aimYaw: number,
+    range: number,
+    hitHalfWidth: number,
+    onHit?: (evt: HitReactionEvent) => void,
+    isBlockedByWall?: (tx: number, tz: number) => boolean,
+  ): number {
+    const dirX = Math.sin(aimYaw);
+    const dirZ = Math.cos(aimYaw);
+    let kills = 0;
+
+    for (let i = 0; i < this.actors.length; i++) {
+      const a = this.actors[i];
+      if (a.reaction === 'dead' || a.isDying) continue;
+
+      const dx = a.x - originX;
+      const dz = a.z - originZ;
+      const dist = Math.hypot(dx, dz);
+      if (dist > range + a.collisionRadius) continue;
+      if (Math.abs(a.y - originY) > 6.5) continue;
+
+      // Strict manual aim check along the player's aimed bullet ray (no auto-aim cone)
+      const forwardProj = dx * dirX + dz * dirZ;
+      if (forwardProj < -0.25 || forwardProj > range + a.collisionRadius) continue;
+      const perpDist = Math.abs(dx * dirZ - dz * dirX);
+      if (perpDist > a.collisionRadius + hitHalfWidth) continue;
+
+      if (isBlockedByWall && isBlockedByWall(a.x, a.z)) continue;
+
+      a.reaction = 'knocked';
+      a.isDying = true;
+      a.reactionTimer = 0.48;
+      a.bloodTrailTimer = 0.06;
+      a.hitCount += 1;
+      this.hitTotal += 1;
+      this.killTotal += 1;
+      kills += 1;
+
+      const pushDirX = dist > 0.01 ? dx / dist : dirX;
+      const pushDirZ = dist > 0.01 ? dz / dist : dirZ;
+      a.vx = pushDirX * 8.5;
+      a.vz = pushDirZ * 8.5;
+      a.vy = 4.6;
+      a.tumblePitch = 0.5;
+      a.tumbleRoll = (dx >= 0 ? 1 : -1) * 0.7;
+
+      this.spawnBloodBurst(
+        a.x,
+        a.y + (a.category === 'human' ? 0.9 : 0.4),
+        a.z,
+        a.vx,
+        a.vz,
+        24,
+      );
+      const floorAtHit = groundHeightAt(a.x, a.z, this.mapId);
+      this.spawnBloodPool(a.x, floorAtHit, a.z, 1.15 + a.collisionRadius * 0.7);
+
+      onHit?.({
+        actorId: a.id,
+        label: a.label,
+        category: a.category,
+        sound: a.soundKind,
+        speedKmh: 50,
+        isKill: true,
+        coinsAwarded: a.coinReward,
+      });
+    }
+
+    return kills;
+  }
+
   private populateActors(): void {
     const world = getMapWorldData(this.mapId);
-    const roadDist = (x: number, z: number) => {
-      let best = Infinity;
-      const pts = world.roadPoints;
-      for (let i = 0; i < pts.length; i += 3) {
+    const pts = world.roadPoints;
+
+    const nearestRoadInfo = (x: number, z: number): { dist: number; nx: number; nz: number } => {
+      let bestDist = Infinity;
+      let bestIdx = 0;
+      for (let i = 0; i < pts.length; i += 2) {
         const d = Math.hypot(x - pts[i].x, z - pts[i].z);
-        if (d < best) best = d;
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
       }
-      return best;
+      // Also check Downtown LS North-South avenue (x=0, z in [-2650, -1420]) and East-West avenues (z=-1820, z=-1485)
+      if (z <= -1400 && z >= -2650) {
+        const dMainAve = Math.abs(x);
+        if (dMainAve < bestDist) {
+          return { dist: dMainAve, nx: x >= 0 ? 1 : -1, nz: 0 };
+        }
+      }
+      if (x >= -1080 && x <= 780) {
+        const dCross1 = Math.abs(z - -1820);
+        if (dCross1 < bestDist) {
+          return { dist: dCross1, nx: 0, nz: z >= -1820 ? 1 : -1 };
+        }
+        const dCross2 = Math.abs(z - -1485);
+        if (dCross2 < bestDist) {
+          return { dist: dCross2, nx: 0, nz: z >= -1485 ? 1 : -1 };
+        }
+      }
+      const p0 = pts[bestIdx];
+      const p1 = pts[(bestIdx + 1) % pts.length];
+      const tx = p1.x - p0.x;
+      const tz = p1.z - p0.z;
+      const len = Math.hypot(tx, tz) || 1;
+      const rnx = -tz / len;
+      const rnz = tx / len;
+      const side = (x - p0.x) * rnx + (z - p0.z) * rnz >= 0 ? 1 : -1;
+      return { dist: bestDist, nx: rnx * side, nz: rnz * side };
     };
 
-    const spawnHuman = (arch: HumanArchetype, x: number, z: number, idx: number) => {
+    // Push any ground animal coordinate onto grass well clear of all roads (min 28m from road centerlines)
+    const ensureGrassPosition = (x: number, z: number, minGrassDist = 28): [number, number] => {
+      let cx = x;
+      let cz = z;
+      for (let iter = 0; iter < 3; iter++) {
+        const info = nearestRoadInfo(cx, cz);
+        if (info.dist < minGrassDist) {
+          const push = minGrassDist - info.dist + 4;
+          cx += info.nx * push;
+          cz += info.nz * push;
+        }
+      }
+      return [cx, cz];
+    };
+
+    const spawnHuman = (arch: HumanArchetype, x: number, z: number, idx: number, customLabel?: string) => {
       const spec = HUMAN_ARCHETYPES.find((h) => h.id === arch) ?? HUMAN_ARCHETYPES[0];
       const rig = buildHumanRig(spec, this.sharedMaterials, this.sharedGeometries);
       const y = groundHeightAt(x, z, this.mapId);
@@ -860,7 +995,7 @@ export class LivingWorldController {
       this.group.add(rig.root);
       this.actors.push({
         id: `human-${idx}`,
-        label: spec.name,
+        label: customLabel ?? spec.name,
         category: 'human',
         archetypeId: spec.id,
         homeX: x,
@@ -872,7 +1007,7 @@ export class LivingWorldController {
         vy: 0,
         vz: 0,
         yaw: (idx * 1.4) % (Math.PI * 2),
-        wanderAngle: idx * 0.9,
+        wanderAngle: idx % 2 === 0 ? 0 : Math.PI,
         wanderTimer: 2 + (idx % 4),
         reaction: 'calm',
         reactionTimer: 0,
@@ -883,7 +1018,7 @@ export class LivingWorldController {
         tumbleRoll: 0,
         tumblePitch: 0,
         hitCount: 0,
-        walkSpeed: 1.7 + (idx % 3) * 0.35,
+        walkSpeed: 1.55 + (idx % 3) * 0.3,
         fleeSpeed: 6.8,
         collisionRadius: 0.65,
         locomotion: 'biped',
@@ -897,7 +1032,9 @@ export class LivingWorldController {
       });
     };
 
-    const spawnAnimal = (spec: AnimalSpeciesSpec, x: number, z: number, idx: number) => {
+    const spawnAnimal = (spec: AnimalSpeciesSpec, rawX: number, rawZ: number, idx: number) => {
+      const [x, z] =
+        spec.habitat === 'sky' ? [rawX, rawZ] : ensureGrassPosition(rawX, rawZ, 28);
       const rig = buildAnimalRig(spec, this.sharedMaterials, this.sharedGeometries);
       const groundY = groundHeightAt(x, z, this.mapId);
       const startY = spec.habitat === 'sky' ? groundY + 18 : groundY;
@@ -944,45 +1081,83 @@ export class LivingWorldController {
       });
     };
 
-    // 1. Place 26 Diverse Pedestrians across Los Santos Downtown, Vespucci Beach, Vinewood, and La Mesa
+    // Build painted white Zebra Crossing stripes across Downtown LS & Circuit avenues
+    const zebraStripeGeo = new THREE.PlaneGeometry(1.1, 3.6);
+    zebraStripeGeo.rotateX(-Math.PI / 2);
+    const zebraStripeMat = new THREE.MeshBasicMaterial({
+      color: 0xf8fafc,
+      polygonOffset: true,
+      polygonOffsetFactor: -3,
+    });
+    const zebraCrossingsZ = [-1560, -1660, -1760, -1860, -1960, -2060];
+    for (const cz of zebraCrossingsZ) {
+      const gy = groundHeightAt(0, cz, this.mapId) + 0.05;
+      for (let sx = -11; sx <= 11; sx += 2.2) {
+        const stripe = new THREE.Mesh(zebraStripeGeo, zebraStripeMat);
+        stripe.position.set(sx, gy, cz);
+        this.group.add(freezeMesh(stripe));
+      }
+    }
+    // Also add 2 Zebra Crossings on the main circuit road near the start boulevard
+    for (const ptIdx of [6, 18]) {
+      if (ptIdx < pts.length) {
+        const cp = pts[ptIdx];
+        const np = pts[(ptIdx + 1) % pts.length];
+        const yaw = Math.atan2(np.x - cp.x, np.z - cp.z);
+        const nx = -Math.cos(yaw);
+        const nz = Math.sin(yaw);
+        const gy = groundHeightAt(cp.x, cp.z, this.mapId) + 0.05;
+        for (let s = -12; s <= 12; s += 2.4) {
+          const stripe = new THREE.Mesh(zebraStripeGeo, zebraStripeMat);
+          stripe.position.set(cp.x + nx * s, gy, cp.z + nz * s);
+          stripe.rotation.y = yaw;
+          this.group.add(freezeMesh(stripe));
+        }
+      }
+    }
+
+    // 1. Place Pedestrians strictly on Sidepaths (Sidewalks x = ±16..19m) and Zebra Crossing lines
     const humanSpots: Array<[HumanArchetype, number, number]> = [
-      ['business', -18, -1620], ['business', 22, -1690], ['officer', 18, -1815],
-      ['streetwear', -25, -1870], ['tourist', 28, -1935], ['business', -120, -1830],
-      ['officer', -220, -1480], ['streetwear', 210, -1480], ['tourist', -40, -1480],
+      // Sidepaths along Downtown LS main avenue
+      ['business', -17, -1620], ['business', 17, -1690], ['officer', 17.5, -1815],
+      ['streetwear', -17.5, -1870], ['tourist', 18, -1935], ['business', -120, -1803],
+      ['officer', -220, -1468], ['streetwear', 210, -1468], ['tourist', -40, -1468],
+      // Zebra crossing pedestrians
+      ['business', -6, -1560], ['tourist', 5, -1660], ['streetwear', -4, -1760],
+      ['jogger', 6, -1860], ['business', -5, -1960], ['tourist', 4, -2060],
+      // Vespucci & La Mesa sidepaths
       ['jogger', -895, -1580], ['beachgoer', -965, -1720], ['beachgoer', -975, -1920],
-      ['tourist', -1035, -1820], ['streetwear', -1095, -1815], ['jogger', -905, -2060],
-      ['worker', 690, -1610], ['worker', 745, -1810], ['worker', 540, -1820],
-      ['hiker', -135, -2640], ['tourist', 15, -2420], ['hiker', -260, -760],
-      ['hiker', 310, -780], ['officer', -15, -2215], ['business', 110, -2210],
-      ['beachgoer', -985, -1820], ['streetwear', -68, -1755],
+      ['tourist', -1035, -1803], ['streetwear', -1095, -1803], ['jogger', -905, -2060],
+      ['worker', 690, -1610], ['worker', 745, -1803], ['worker', 540, -1803],
+      ['hiker', -135, -2640], ['tourist', 17, -2420],
     ];
     humanSpots.forEach(([arch, x, z], i) => {
-      if (roadDist(x, z) > 6) spawnHuman(arch, x, z, i);
+      spawnHuman(arch, x, z, i);
     });
 
-    // 2. Guarantee EVERY SINGLE ONE of the 23 Animal Species appears in its iconic Los Santos / Wildlands habitat!
+    // 2. Guarantee EVERY SINGLE ONE of the 23 Animal Species appears in grass/off-road habitats (never on roads!)
     const guaranteedAnimalSpawns: Array<[AnimalSpecies, number, number]> = [
-      // Urban Pets in Downtown & Vespucci
-      ['golden_retriever', -26, -1640],
-      ['german_shepherd', 26, -1820],
+      // Urban Pets in Downtown & Vespucci grassy parks (pushed >=28m off road)
+      ['golden_retriever', -42, -1640],
+      ['german_shepherd', 42, -1860],
       ['dalmatian', -892, -1760],
-      ['french_bulldog', -28, -1880],
-      ['tabby_cat', 120, -1830],
-      ['black_cat', -140, -1500],
-      // Birds (City, Pier, Lake & Sky)
-      ['pigeon', -12, -1790],
-      ['seagull', -980, -1810],
+      ['french_bulldog', -44, -1880],
+      ['tabby_cat', 120, -1865],
+      ['black_cat', -140, -1535],
+      // Birds (City parks, Pier, Lake & Sky)
+      ['pigeon', -38, -1790],
+      ['seagull', -980, -1860],
       ['crow', 540, -1650],
       ['bald_eagle', -260, -740],
       ['red_hawk', -80, -2520],
       ['mallard_duck', -90, 45],
-      // Small Wildlife
+      // Small Wildlife in grass meadows
       ['cottontail_rabbit', -220, 120],
       ['jackrabbit', 190, -340],
       ['red_fox', -310, -220],
-      ['gray_squirrel', -28, -2410],
+      ['gray_squirrel', -45, -2410],
       ['raccoon', 715, -1740],
-      // Large Wildlife
+      // Large Wildlife in grass & hills
       ['whitetail_deer', -340, -680],
       ['elk_stag', 290, -720],
       ['timber_wolf', -230, -820],
@@ -996,19 +1171,19 @@ export class LivingWorldController {
       spawnAnimal(spec, x, z, idx);
     });
 
-    // 3. Add a second flock / herd wave across the Wildlands & Los Santos parks (+28 more)
+    // 3. Second flock / herd wave across the Wildlands & Los Santos parks (+28 more in grass)
     const extraSpots: Array<[AnimalSpecies, number, number]> = [
-      ['pigeon', 16, -1805], ['pigeon', -18, -1812],
-      ['seagull', -1060, -1812], ['seagull', -955, -1980],
-      ['golden_retriever', -905, -1845], ['tabby_cat', 56, -1485],
+      ['pigeon', 38, -1805], ['pigeon', -38, -1812],
+      ['seagull', -1060, -1860], ['seagull', -955, -1980],
+      ['golden_retriever', -905, -1865], ['tabby_cat', 56, -1530],
       ['cottontail_rabbit', 140, 130], ['cottontail_rabbit', -160, -95],
       ['whitetail_deer', -265, -490], ['whitetail_deer', 180, -410],
       ['red_fox', 240, 180], ['gray_squirrel', -190, 290],
       ['bald_eagle', 0, -1850], ['red_hawk', 560, -1900],
       ['mallard_duck', -70, -120], ['timber_wolf', 310, -490],
       ['jackrabbit', 340, 35], ['bighorn_ram', 245, -830],
-      ['german_shepherd', -210, -1835], ['dalmatian', -15, -2225],
-      ['raccoon', 745, -1935], ['crow', 625, -1820],
+      ['german_shepherd', -210, -1865], ['dalmatian', -42, -2225],
+      ['raccoon', 745, -1935], ['crow', 625, -1860],
       ['grizzly_bear', -390, -840], ['mountain_cougar', 410, -630],
       ['elk_stag', -210, -560], ['french_bulldog', -898, -1660],
       ['black_cat', 88, -2225], ['mallard_duck', -990, -1640],
@@ -1018,7 +1193,9 @@ export class LivingWorldController {
       spawnAnimal(spec, x, z, 100 + idx);
     });
 
-    // 4. In Freestyle mode, populate significantly more roaming wildlife & roadside animals (+86 more = ~137 total animals)
+    // 4. In Freestyle mode:
+    //    - Animals spawn strictly in GRASS pastures alongside the road (lateralDist = 29..52m, never on roads!)
+    //    - Pedestrians spawn on SIDEPATHS (sidewalks), ZEBRA CROSSINGS, and INSIDE Downtown LS Enterable Houses!
     if (this.mode === 'freestyle') {
       const roadPts = world.roadPoints;
       const startPt = roadPts[0] ?? { x: 0, z: 0 };
@@ -1036,37 +1213,48 @@ export class LivingWorldController {
         const nx = -tz / len;
         const nz = tx / len;
 
-        // Place near road shoulder / meadow crossings so drivers spot wildlife constantly in Freestyle
+        // Place strictly in the grass off-road (29m to 52m from road centerline)
         const side = k % 2 === 0 ? 1 : -1;
-        const lateralDist = 14 + ((k * 11) % 16);
+        const lateralDist = 29 + ((k * 11) % 23);
         const ax = p0.x + nx * side * lateralDist;
         const az = p0.z + nz * side * lateralDist;
 
-        // Avoid cluttering the immediate start grid
-        if (Math.hypot(ax - startPt.x, az - startPt.z) < 26) continue;
+        if (Math.hypot(ax - startPt.x, az - startPt.z) < 28) continue;
 
         const spec = groundSpecies[(k * 5 + 3) % groundSpecies.length];
         spawnAnimal(spec, ax, az, 300 + k);
       }
 
-      // Also populate significantly more pedestrians in Freestyle (+66 across LS boulevards & roadside walks = ~92 total people)
+      // Pedestrians on Downtown LS sidepaths (x = ±16.5..19.5m) & zebra crossings
       const freestyleHumanExtras: Array<[HumanArchetype, number, number]> = [
-        ['business', -22, -1540], ['streetwear', 22, -1580], ['officer', -20, -1660],
-        ['tourist', 24, -1730], ['business', -20, -1780], ['jogger', 20, -1840],
-        ['streetwear', -22, -1910], ['tourist', 24, -1980], ['officer', -24, -2060],
-        ['business', 22, -2140], ['tourist', -80, -1485], ['streetwear', 85, -1485],
-        ['worker', 190, -1485], ['jogger', -190, -1485], ['business', -140, -1825],
-        ['tourist', 140, -1825], ['streetwear', -260, -1825], ['officer', 260, -1825],
+        ['business', -17.5, -1540], ['streetwear', 17.5, -1580], ['officer', -17.5, -1660],
+        ['tourist', 18, -1730], ['business', -17.5, -1780], ['jogger', 17.5, -1840],
+        ['streetwear', -18, -1910], ['tourist', 18, -1980], ['officer', -18, -2060],
+        ['business', 17.5, -2140], ['tourist', -80, -1468], ['streetwear', 85, -1468],
+        ['worker', 190, -1468], ['jogger', -190, -1468], ['business', -140, -1803],
+        ['tourist', 140, -1803], ['streetwear', -260, -1803], ['officer', 260, -1803],
+        // Extra zebra crossing walkers
+        ['streetwear', -2, -1560], ['business', 3, -1560],
+        ['tourist', -3, -1660], ['jogger', 2, -1660],
+        ['business', -2, -1760], ['streetwear', 3, -1760],
+        ['tourist', -3, -1860], ['beachgoer', 2, -1960],
+        // Sidewalk & promenade walkers
         ['beachgoer', -920, -1520], ['jogger', -940, -1620], ['tourist', -950, -1760],
         ['beachgoer', -960, -1860], ['streetwear', -945, -1960], ['jogger', -925, -2020],
         ['worker', 610, -1640], ['worker', 660, -1740], ['worker', 710, -1870],
-        ['hiker', -90, -2480], ['tourist', 75, -2380], ['hiker', -180, -2560],
-        ['hiker', 190, -2520], ['streetwear', 45, -1640], ['business', -45, -1710],
+        // Residents INSIDE the Downtown LS Enterable Houses (so players can walk inside houses and kill them!)
+        ['business', -34, -1598], ['tourist', -36, -1602], ['streetwear', -32, -1601],
+        ['business', 34, -1638], ['tourist', 36, -1642], ['jogger', 32, -1640],
+        ['streetwear', -34, -1718], ['business', -36, -1722], ['tourist', -32, -1720],
+        ['business', 34, -1778], ['streetwear', 36, -1782], ['tourist', 32, -1780],
+        ['tourist', -34, -1898], ['business', -36, -1902], ['jogger', -32, -1900],
+        ['business', 34, -1948], ['tourist', 36, -1952], ['streetwear', 32, -1950],
       ];
       freestyleHumanExtras.forEach(([arch, x, z], i) => {
         spawnHuman(arch, x, z, 100 + i);
       });
 
+      // Circuit sidepath walkers (placed along the pedestrian sidepath at 22m from road centerline)
       const roadHumanCount = 34;
       const humanStride = Math.max(1, Math.floor(roadPts.length / roadHumanCount));
       for (let k = 0; k < roadHumanCount; k++) {
@@ -1080,7 +1268,7 @@ export class LivingWorldController {
         const nz = tx / len;
 
         const side = k % 2 === 0 ? -1 : 1;
-        const lateralDist = 13 + ((k * 7) % 10);
+        const lateralDist = 21.5 + (k % 3) * 1.2;
         const hx = p0.x + nx * side * lateralDist;
         const hz = p0.z + nz * side * lateralDist;
         if (Math.hypot(hx - startPt.x, hz - startPt.z) < 28) continue;
@@ -1342,14 +1530,15 @@ export class LivingWorldController {
           if (a.reactionTimer <= 0) a.reaction = 'calm';
         } else {
           a.wanderTimer -= safeDt;
-          if (a.wanderTimer <= 0) {
+          const distHome = Math.hypot(a.x - a.homeX, a.z - a.homeZ);
+          const maxWanderRadius =
+            a.category === 'animal' ? 7.5 : a.label.includes('Resident') ? 2.2 : 8.5;
+          if (distHome > maxWanderRadius) {
+            a.wanderAngle = Math.atan2(a.homeX - a.x, a.homeZ - a.z);
+            a.wanderTimer = 1.8;
+          } else if (a.wanderTimer <= 0) {
             a.wanderTimer = 2.5 + ((i * 17) % 4);
-            const distHome = Math.hypot(a.x - a.homeX, a.z - a.homeZ);
-            if (distHome > 24) {
-              a.wanderAngle = Math.atan2(a.homeX - a.x, a.homeZ - a.z);
-            } else {
-              a.wanderAngle += (Math.sin(elapsed * 2.1 + i) > 0 ? 1 : -1) * 0.9;
-            }
+            a.wanderAngle += (Math.sin(elapsed * 2.1 + i) > 0 ? 1 : -1) * 0.9;
           }
         }
 

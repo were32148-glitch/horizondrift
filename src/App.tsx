@@ -7,6 +7,7 @@ import { LobbyModal } from './components/LobbyModal';
 import {
   awardCoins,
   getCarSpec,
+  getCharacterSpec,
   loadGarageSave,
   purchaseCar,
   purchaseCharacter,
@@ -192,9 +193,6 @@ export default function App() {
   const [coinToast, setCoinToast] = useState<string | null>(null);
   const [reactionToast, setReactionToast] = useState<string | null>(null);
   const [lastRaceBonusCoins, setLastRaceBonusCoins] = useState(0);
-  const [isOnFoot, setIsOnFoot] = useState(false);
-  const [characterHealth, setCharacterHealth] = useState(100);
-  const [wantedLevel, setWantedLevel] = useState(0);
 
   const driverRef = useRef<DrivingControllerHandle | null>(null);
   const socketClientRef = useRef<LobbySocketClient | null>(null);
@@ -427,8 +425,24 @@ export default function App() {
   }, []);
 
   const handleToggleOnFoot = useCallback(() => {
-    setIsOnFoot((prev) => !prev);
-    driverRef.current?.toggleOnFoot?.();
+    driverRef.current?.initAudio();
+    driverRef.current?.toggleOnFoot();
+  }, []);
+
+  const handleAttackWeapon = useCallback(() => {
+    driverRef.current?.initAudio();
+    driverRef.current?.triggerAttack();
+  }, []);
+
+  const handleUseEnergyDrink = useCallback(() => {
+    driverRef.current?.initAudio();
+    driverRef.current?.useEnergyDrink();
+  }, []);
+
+  const handleActionBanner = useCallback((text: string) => {
+    setReactionToast(text);
+    if (reactionTimerRef.current !== null) window.clearTimeout(reactionTimerRef.current);
+    reactionTimerRef.current = window.setTimeout(() => setReactionToast(null), 2200);
   }, []);
 
   const handleSelectOrBuyCharacter = useCallback((charId: CharacterId) => {
@@ -574,6 +588,7 @@ export default function App() {
 
   const specP1 = getCarSpec(garage.equippedP1);
   const specP2 = getCarSpec(garage.equippedP2);
+  const charSpec = getCharacterSpec(garage.equippedCharacter);
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-slate-950 select-none">
@@ -589,10 +604,6 @@ export default function App() {
         lobbyState={activeLobby}
         localClientId={clientId}
         remoteSnapshots={remoteSnapshots}
-        isOnFoot={isOnFoot}
-        onToggleOnFoot={handleToggleOnFoot}
-        characterHealth={characterHealth}
-        wantedLevel={wantedLevel}
         equippedCharacter={garage.equippedCharacter}
         equippedWeapon={garage.equippedWeapon}
         onHudUpdate={setHud}
@@ -602,6 +613,7 @@ export default function App() {
         onRaceFinished={handleRaceFinished}
         onSendSnapshot={handleSendSnapshot}
         onReactionEvent={handleReactionEvent}
+        onActionBanner={handleActionBanner}
       />
       <GameHud
         phase={phase}
@@ -614,16 +626,13 @@ export default function App() {
         totalCoins={garage.coins}
         equippedCarP1Name={specP1.name}
         equippedCarP2Name={specP2.name}
+        equippedCharacterName={charSpec.name}
+        equippedWeapon={garage.equippedWeapon}
         beaconToast={beaconToast}
         coinToast={coinToast}
         reactionToast={reactionToast}
         lastRaceBonusCoins={lastRaceBonusCoins}
         activeLobby={activeLobby}
-        isOnFoot={isOnFoot}
-        onToggleOnFoot={handleToggleOnFoot}
-        characterHealth={characterHealth}
-        wantedLevel={wantedLevel}
-        equippedWeapon={garage.equippedWeapon}
         onSelectMode={handleSelectMode}
         onSelectMap={handleSelectMap}
         onStart={handleStart}
@@ -642,6 +651,9 @@ export default function App() {
         onToggleLights={() => driverRef.current?.toggleHeadlights()}
         onToggleMute={handleToggleMute}
         onSelectPaint={handleSelectPaint}
+        onToggleOnFoot={handleToggleOnFoot}
+        onAttackWeapon={handleAttackWeapon}
+        onUseEnergyDrink={handleUseEnergyDrink}
       />
       {garageOpen && (
         <GarageModal

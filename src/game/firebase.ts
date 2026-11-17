@@ -137,6 +137,11 @@ export function subscribeAuth(cb: (user: User | null) => void): Unsubscribe {
   return onAuthStateChanged(firebaseAuth, cb);
 }
 
+const CLOUD_CAR_IDS = new Set<CarId>(['apex', 'baja', 'viper', 'phantom', 'titan']);
+function sanitizeCloudCarId(id: string): CarId {
+  return CLOUD_CAR_IDS.has(id as CarId) ? (id as CarId) : 'apex';
+}
+
 export async function syncUserProfileToCloud(
   user: User,
   localGarage: GarageSaveData,
@@ -147,27 +152,26 @@ export async function syncUserProfileToCloud(
   try {
     const snap = await getDoc(ref);
     if (!snap.exists()) {
-      const owned = Array.from(new Set<CarId>(['apex', ...localGarage.ownedCars])).slice(0, 5);
+      const cloudOwned = Array.from(
+        new Set<CarId>(['apex', ...localGarage.ownedCars.filter((c) => CLOUD_CAR_IDS.has(c))]),
+      ).slice(0, 5);
       await setDoc(ref, {
         uid: user.uid,
         displayName: sanitizeDisplayName(user.displayName),
         coins: Math.min(10000000, Math.max(0, Math.floor(localGarage.coins))),
-        ownedCars: owned,
-        equippedP1: sanitizeCarId(localGarage.equippedP1),
-        equippedP2: sanitizeCarId(localGarage.equippedP2),
-        equippedCharacter: localGarage.equippedCharacter ?? 'default',
-        unlockedCharacters: localGarage.unlockedCharacters ?? ['default'],
-        equippedWeapon: localGarage.equippedWeapon ?? 'fists',
-        unlockedWeapons: localGarage.unlockedWeapons ?? ['fists'],
+        ownedCars: cloudOwned,
+        equippedP1: sanitizeCloudCarId(localGarage.equippedP1),
+        equippedP2: sanitizeCloudCarId(localGarage.equippedP2),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      return { ...localGarage, ownedCars: owned };
+      return localGarage;
     }
     const cloud = snap.data() as Partial<GarageSaveData>;
     const mergedOwned = Array.from(
       new Set<CarId>(['apex', ...(cloud.ownedCars ?? []), ...localGarage.ownedCars]),
-    ).slice(0, 5);
+    );
+    const cloudOwned = mergedOwned.filter((c) => CLOUD_CAR_IDS.has(c)).slice(0, 5);
     const mergedCoins = Math.max(
       typeof cloud.coins === 'number' ? cloud.coins : 0,
       localGarage.coins,
@@ -177,21 +181,17 @@ export async function syncUserProfileToCloud(
       ownedCars: mergedOwned,
       equippedP1: sanitizeCarId(localGarage.equippedP1),
       equippedP2: sanitizeCarId(localGarage.equippedP2),
-      equippedCharacter: localGarage.equippedCharacter ?? cloud.equippedCharacter ?? 'default',
-      unlockedCharacters: Array.from(new Set([...(cloud.unlockedCharacters ?? ['default']), ...localGarage.unlockedCharacters])),
-      equippedWeapon: localGarage.equippedWeapon ?? cloud.equippedWeapon ?? 'fists',
-      unlockedWeapons: Array.from(new Set([...(cloud.unlockedWeapons ?? ['fists']), ...localGarage.unlockedWeapons])),
+      equippedCharacter: localGarage.equippedCharacter ?? 'default',
+      unlockedCharacters: localGarage.unlockedCharacters ?? ['default'],
+      equippedWeapon: localGarage.equippedWeapon ?? 'fists',
+      unlockedWeapons: localGarage.unlockedWeapons ?? ['fists'],
     };
     await updateDoc(ref, {
       displayName: sanitizeDisplayName(user.displayName),
       coins: merged.coins,
-      ownedCars: merged.ownedCars,
-      equippedP1: merged.equippedP1,
-      equippedP2: merged.equippedP2,
-      equippedCharacter: merged.equippedCharacter,
-      unlockedCharacters: merged.unlockedCharacters,
-      equippedWeapon: merged.equippedWeapon,
-      unlockedWeapons: merged.unlockedWeapons,
+      ownedCars: cloudOwned,
+      equippedP1: sanitizeCloudCarId(merged.equippedP1),
+      equippedP2: sanitizeCloudCarId(merged.equippedP2),
       updatedAt: serverTimestamp(),
     });
     return merged;

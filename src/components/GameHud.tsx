@@ -59,11 +59,11 @@ interface GameHudProps {
   reactionToast: string | null;
   lastRaceBonusCoins: number;
   activeLobby: LobbyState | null;
-  isOnFoot: boolean;
-  onToggleOnFoot: () => void;
-  characterHealth: number;
-  wantedLevel: number;
+  equippedCharacterName: string;
   equippedWeapon: WeaponId;
+  onToggleOnFoot: () => void;
+  onAttackWeapon: () => void;
+  onUseEnergyDrink: () => void;
   onSelectMode: (mode: GameMode) => void;
   onSelectMap: (mapId: MapId) => void;
   onStart: () => void;
@@ -241,11 +241,11 @@ export function GameHud({
   reactionToast,
   lastRaceBonusCoins,
   activeLobby,
-  isOnFoot,
-  onToggleOnFoot,
-  characterHealth,
-  wantedLevel,
+  equippedCharacterName,
   equippedWeapon,
+  onToggleOnFoot,
+  onAttackWeapon,
+  onUseEnergyDrink,
   onSelectMode,
   onSelectMap,
   onStart,
@@ -463,6 +463,13 @@ export function GameHud({
                   · P2: <span className="text-sky-300">{equippedCarP2Name}</span>
                 </>
               )}
+              {mode === 'freestyle' && (
+                <>
+                  {' '}
+                  · Character: <span className="text-emerald-300">{equippedCharacterName}</span> ·
+                  Weapon: <span className="text-rose-300">{equippedWeapon}</span>
+                </>
+              )}
               {activeLobby && (
                 <>
                   {' '}
@@ -478,7 +485,7 @@ export function GameHud({
 
         {/* Bottom Control Hint */}
         <div className="text-center text-[11px] font-bold tracking-widest text-slate-200 uppercase [text-shadow:0_2px_8px_rgba(0,0,0,0.95)]">
-          Drive North over Great Divide Passes to reach Los Santos · P1: WASD + Space + L-Shift · P2: Arrows + Enter · C Cam · Esc Pause
+          Drive North to Los Santos · P1: WASD + Space + CapsLock (Nitro) · P2: Arrows + Enter + Shift (Nitro) · E Exit Car · F Shoot · Esc Pause
         </div>
       </div>
     );
@@ -488,12 +495,34 @@ export function GameHud({
   const p2 = hud.players[1];
   const is2P = hud.mode === 'race2p' && Boolean(p2);
   const isRace = hud.mode !== 'freestyle';
+  const isOnFoot = Boolean(hud.isOnFoot);
+  const charHp = hud.characterHealth ?? 100;
+  const charMaxHp = hud.characterMaxHealth ?? 100;
+  const charEnergy = hud.characterEnergy ?? 100;
+  const wantedLevel = hud.wantedLevel ?? 0;
 
   return (
     <>
       {/* 2P Vertical Split-Screen Center Divider */}
       {is2P && (
         <div className="pointer-events-none fixed inset-y-0 left-1/2 z-10 w-[3px] -translate-x-1/2 bg-slate-950 shadow-[0_0_12px_rgba(0,0,0,0.9)]" />
+      )}
+
+      {/* Character Death ("WASTED") Banner */}
+      {phase === 'playing' && hud.isCharacterDead && (
+        <div
+          data-testid="wasted-banner"
+          className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center bg-rose-950/60"
+        >
+          <div className="border-4 border-rose-500 bg-slate-950/95 px-10 py-6 text-center shadow-2xl">
+            <div className="font-mono text-5xl font-black tracking-widest text-rose-500 uppercase">
+              WASTED
+            </div>
+            <div className="mt-2 text-xs font-bold tracking-widest text-slate-200 uppercase">
+              Neutralized by LSPD Police · Respawning with Full Energy...
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Starting Countdown Banner */}
@@ -527,37 +556,94 @@ export function GameHud({
           is2P ? 'p-2 sm:p-2.5' : 'p-3 sm:p-4'
         }`}
       >
-        {/* Freestyle On-Foot / Exit Car Button & Wanted Bar */}
+        {/* Freestyle Action Bar: Exit/Enter Car, Shoot/Attack, Energy Drink, Garage & Wanted/HP Status */}
         {mode === 'freestyle' && phase === 'playing' && (
-          <div className="pointer-events-auto fixed bottom-6 left-1/2 z-20 -translate-x-1/2 flex items-center gap-3">
+          <div className="pointer-events-auto fixed bottom-14 left-1/2 z-20 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2">
             <button
               type="button"
               data-testid="toggle-onfoot-btn"
               onClick={onToggleOnFoot}
-              className={`cursor-pointer border-2 px-6 py-3 text-sm font-black tracking-wider uppercase shadow-2xl transition-transform hover:scale-105 ${
+              className={`cursor-pointer border-2 px-4 py-2.5 text-xs font-black tracking-wider uppercase shadow-2xl transition-transform hover:scale-105 ${
                 isOnFoot
-                  ? 'border-emerald-400 bg-emerald-500 text-slate-950 animate-pulse'
+                  ? 'border-emerald-400 bg-emerald-500 text-slate-950'
                   : 'border-amber-400 bg-amber-500 text-slate-950'
               }`}
             >
               {isOnFoot ? 'Enter Car [E]' : 'Exit Car [E]'}
             </button>
-            <div className="flex flex-col gap-1 border border-slate-700 bg-slate-950/92 px-3.5 py-2 shadow-xl">
-              <div className="flex items-center justify-between gap-4">
-                <span className="text-[10px] font-bold text-slate-400 uppercase">Wanted</span>
-                <span className="font-mono text-xs tracking-wider text-amber-400">
-                  {wantedLevel === 0 ? '☆☆☆☆☆' : '★'.repeat(wantedLevel) + '☆'.repeat(5 - wantedLevel)}
+
+            <button
+              type="button"
+              data-testid="attack-weapon-btn"
+              onClick={onAttackWeapon}
+              className="cursor-pointer border-2 border-amber-300 bg-amber-500 px-4 py-2.5 text-xs font-black tracking-wider text-slate-950 uppercase shadow-2xl transition-transform hover:scale-105 hover:bg-amber-400"
+            >
+              Shoot Gold ({equippedWeapon.replace('_', ' ')}) [F / Click]
+            </button>
+            {isOnFoot && (
+              <div
+                data-testid="manual-aim-badge"
+                className="border border-amber-400/80 bg-slate-950/90 px-2.5 py-2 font-mono text-[10px] font-black tracking-wider text-amber-300 uppercase shadow-lg"
+              >
+                AIM: MOUSE / A·D
+              </div>
+            )}
+
+            <button
+              type="button"
+              data-testid="use-energy-btn"
+              onClick={onUseEnergyDrink}
+              className="cursor-pointer border-2 border-cyan-400 bg-cyan-600 px-3.5 py-2.5 text-xs font-black tracking-wider text-slate-950 uppercase shadow-2xl transition-transform hover:scale-105 hover:bg-cyan-400"
+            >
+              Energy Drink (+100% HP) [G]
+            </button>
+
+            <button
+              type="button"
+              data-testid="hud-open-garage-btn"
+              onClick={onOpenGarage}
+              className="cursor-pointer border-2 border-slate-600 bg-slate-950/95 px-3.5 py-2.5 text-xs font-black tracking-wider text-amber-300 uppercase shadow-2xl hover:border-amber-400"
+            >
+              Shop / Armory
+            </button>
+
+            <div className="flex flex-col gap-1 border border-slate-700 bg-slate-950/95 px-3.5 py-1.5 shadow-xl">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">
+                  {wantedLevel > 0 ? 'LSPD PURSUIT' : 'WANTED'}
+                </span>
+                <span
+                  data-testid="wanted-stars"
+                  className={`font-mono text-xs tracking-wider ${
+                    wantedLevel > 0 ? 'text-rose-400 animate-pulse' : 'text-amber-400'
+                  }`}
+                >
+                  {wantedLevel === 0
+                    ? '☆☆☆☆☆'
+                    : '★'.repeat(wantedLevel) + '☆'.repeat(5 - wantedLevel)}
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase">HP</span>
-                <div className="h-2 w-24 overflow-hidden bg-slate-800">
-                  <div className="h-full bg-emerald-400 transition-all" style={{ width: `${characterHealth}%` }} />
+                <span className="w-8 text-[9px] font-bold text-slate-400 uppercase">HP</span>
+                <div className="h-2 w-20 overflow-hidden bg-slate-800">
+                  <div
+                    className="h-full bg-emerald-400 transition-all"
+                    style={{ width: `${Math.min(100, Math.round((charHp / Math.max(1, charMaxHp)) * 100))}%` }}
+                  />
                 </div>
-                <span className="font-mono text-[10px] text-slate-300">{characterHealth}</span>
+                <span data-testid="char-hp-value" className="font-mono text-[10px] text-slate-200">
+                  {charHp}/{charMaxHp}
+                </span>
               </div>
-              <div className="text-[9px] font-mono text-sky-300 uppercase">
-                Weapon: {equippedWeapon.toUpperCase()}
+              <div className="flex items-center gap-2">
+                <span className="w-8 text-[9px] font-bold text-slate-400 uppercase">NRG</span>
+                <div className="h-1.5 w-20 overflow-hidden bg-slate-800">
+                  <div
+                    className="h-full bg-cyan-400 transition-all"
+                    style={{ width: `${charEnergy}%` }}
+                  />
+                </div>
+                <span className="font-mono text-[9px] text-cyan-300">{charEnergy}%</span>
               </div>
             </div>
           </div>
@@ -678,6 +764,22 @@ export function GameHud({
             {p1?.airTime !== undefined && p1.airTime > 0.25 && (
               <div className="border border-emerald-400/80 bg-slate-950/92 px-3 py-1 font-mono text-xs font-black tracking-wider text-emerald-300 uppercase shadow-2xl">
                 AIRBORNE · {p1.airTime.toFixed(1)}S
+              </div>
+            )}
+            {hud.activePower && (
+              <div
+                data-testid="active-power-badge"
+                className="border border-fuchsia-400 bg-fuchsia-950/95 px-3 py-1 font-mono text-xs font-black tracking-wider text-fuchsia-200 uppercase shadow-2xl"
+              >
+                MYSTERY POWER: {hud.activePower.replace('_', ' ')} ({hud.activePowerSeconds ?? 0}s)
+              </div>
+            )}
+            {hud.nearHouseName && (
+              <div
+                data-testid="near-house-badge"
+                className="border border-cyan-400/90 bg-cyan-950/95 px-3 py-1 font-mono text-[11px] font-black tracking-wider text-cyan-200 uppercase shadow-2xl"
+              >
+                HOUSE: {hud.nearHouseName} — Walk Inside Doorway!
               </div>
             )}
             {coinToast && (
